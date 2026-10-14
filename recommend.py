@@ -9,7 +9,7 @@
 import math  # 올림(ceil) 계산을 위한 도구
 
 from candidates import geocode_places, haversine, pick_nearest_stations
-from transit import NoRouteError, get_remaining_calls, get_transit_info, is_cached
+from transit import DAILY_LIMIT, NoRouteError, get_remaining_calls, get_transit_info, is_cached
 
 # 공정성 기준: 코드에서 쓰는 이름 → 사용자에게 보여줄 이름
 CRITERIA = {
@@ -93,6 +93,8 @@ def build_travel_table(start_places, top_n=3):
     # (중간에 한도가 끝나서 호출만 날리고 결과를 못 얻는 일을 막기 위해서예요)
     needed = count_odsay_calls(coords, stations)
     remaining = get_remaining_calls()
+    if needed > 0 and remaining == 0:
+        raise ValueError(f"오늘 대중교통 조회 한도를 다 썼어요. ({DAILY_LIMIT}건) 내일 다시 시도해주세요.")
     if needed > remaining:
         raise ValueError(
             f"이번 추천에는 대중교통 조회가 {needed}번 필요한데, 오늘 남은 횟수는 {remaining}번이에요. "
