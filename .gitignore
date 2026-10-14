@@ -7,3 +7,7 @@ __pycache__/
 # 가상환경 폴더 (각자 컴퓨터에서 새로 만들면 되므로 올릴 필요 없음)
 venv/
 .venv/
+
+# ODsay 결과 메모장(캐시)과 오늘 호출 횟수 기록부 - 내 컴퓨터에서만 쓰는 기록
+data/transit_cache.json
+data/odsay_usage.json

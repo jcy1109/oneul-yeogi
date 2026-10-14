@@ -40,7 +40,7 @@ def load_stations():
         return json.load(f)
 
 
-def get_candidates(start_places, top_n=5):
+def get_candidates(start_places, top_n=3):
     """
     출발지 이름 리스트를 받아서, 중심점에서 가까운 후보역 top_n개를 돌려줍니다.
 
