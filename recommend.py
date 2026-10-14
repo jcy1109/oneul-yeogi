@@ -29,6 +29,18 @@ EQUAL_SIMILAR_MIN = 10
 WALK_LIMIT_KM = 0.7
 WALK_SPEED_KMH = 4  # 보통 걷는 속도 (시속 4km)
 
+# 한 번 검색할 때 ODsay를 최대 몇 번까지 부를지 (하루 30건 제한 때문)
+MAX_CALLS_PER_SEARCH = 10
+MAX_CANDIDATES = 5  # 후보역은 아무리 많아도 5곳까지
+
+
+def candidate_count(friend_count):
+    """
+    친구 수에 따라 후보역 개수를 정합니다. (친구 수 × 후보 수 ≤ 10)
+    2명 → 5곳 (10건), 3명 → 3곳 (9건)
+    """
+    return max(1, min(MAX_CANDIDATES, MAX_CALLS_PER_SEARCH // friend_count))
+
 
 # ─────────────────────────────────────────────
 # [1단계] 이동시간 표 만들기
@@ -59,17 +71,20 @@ def count_odsay_calls(coords, stations):
     return count
 
 
-def estimate_calls(start_places, top_n=3):
+def estimate_calls(start_places, top_n=None):
     """
     출발지 이름만으로 "ODsay를 몇 번 부를지"와 "후보역 이름"을 미리 알려줍니다.
     (카카오만 쓰고 ODsay는 부르지 않아요)
+    top_n을 비워두면 친구 수에 맞춰 후보 개수를 정해요.
     """
+    if top_n is None:
+        top_n = candidate_count(len(start_places))
     coords = geocode_places(start_places)
     stations = pick_nearest_stations(coords, top_n)
     return count_odsay_calls(coords, stations), [s["name"] for s in stations]
 
 
-def build_travel_table(start_places, top_n=3):
+def build_travel_table(start_places, top_n=None):
     """
     [1단계] 친구 × 후보역마다 소요시간과 환승 횟수를 구해서 "이동시간 표"를 만듭니다.
 
@@ -78,14 +93,17 @@ def build_travel_table(start_places, top_n=3):
           "friends": ["강남역", "수원역"],
           "stations": [
             {"name": "금정", "routes": [
-                {"time_min": 40, "transfers": 1, "fare": 1850},   ← 강남역에서
+                {"time_min": 40, "transfers": 1, "fare": 1850, "segments": [...]},   ← 강남역에서
                 {"error": "경로를 찾을 수 없어요."},                ← 수원역에서 (못 구함)
             ]},
             ...
           ]
         }
     routes의 순서는 friends의 순서와 같아요. (같은 출발지를 두 명이 입력해도 헷갈리지 않게)
+    top_n을 비워두면 친구 수에 맞춰 후보 개수를 정해요. (2명 → 5곳, 3명 → 3곳)
     """
+    if top_n is None:
+        top_n = candidate_count(len(start_places))
     coords = geocode_places(start_places)  # 친구 출발지 → 좌표
     stations = pick_nearest_stations(coords, top_n)  # 후보역 고르기
 
@@ -218,6 +236,58 @@ def describe_route(route):
     return f"{route['time_min']}분(환승 {route['transfers']})"
 
 
+def route_summary(route):
+    """
+    경로를 한 줄로 요약합니다.
+    예) "강남 → [2호선] → 사당 (환승) → [4호선] → 금정"
+    """
+    if "error" in route:
+        return "경로 없음"
+    if route.get("walk"):
+        return f"걸어서 {route['time_min']}분"
+
+    rides = [s for s in route.get("segments", []) if s["type"] != "walk"]  # 탈것 구간만
+    if not rides:
+        return "경로 정보 없음"
+
+    text = rides[0]["start"]
+    for i, ride in enumerate(rides):
+        if i > 0:
+            text += " (환승)"
+            # 내린 곳과 다음에 타는 곳이 다르면 (예: 버스 정류장 → 지하철역) 타는 곳도 적어줘요
+            if ride["start"] != rides[i - 1]["end"]:
+                text += f" → {ride['start']}"
+        text += f" → [{ride['line']}] → {ride['end']}"
+    return text
+
+
+def route_details(route):
+    """
+    경로를 구간별 문장 리스트로 바꿉니다. (펼치기 화면에서 한 줄씩 보여줘요)
+    예) ["🚶 도보 1분 (37m)", "🚇 2호선 강남 → 사당 (4개 역, 9분)", ...]
+    """
+    if "error" in route:
+        return [route["error"]]
+    if route.get("walk"):
+        return [f"🚶 출발지에서 역까지 걸어서 {route['time_min']}분"]
+
+    lines = []
+    for seg in route.get("segments", []):
+        if seg["type"] == "walk":
+            if seg["minutes"] == 0:  # 0분 도보(같은 역 안 환승 등)는 생략
+                continue
+            distance = f" ({seg['distance_m']}m)" if seg["distance_m"] else ""
+            lines.append(f"🚶 도보 {seg['minutes']}분{distance}")
+        else:
+            icon = "🚇" if seg["type"] == "subway" else "🚌"
+            unit = "개 역" if seg["type"] == "subway" else "개 정류장"
+            lines.append(
+                f"{icon} {seg['line']} {seg['start']} → {seg['end']} "
+                f"({seg['stations']}{unit}, {seg['minutes']}분)"
+            )
+    return lines
+
+
 def print_ranking(table, criterion=DEFAULT_CRITERION):
     """한 가지 기준의 순위를 보기 좋게 출력합니다."""
     ranked, excluded = rank_stations(table, criterion)
@@ -226,7 +296,7 @@ def print_ranking(table, criterion=DEFAULT_CRITERION):
     for rank, station in enumerate(ranked, start=1):
         print(f"  {rank}위  {station['name']}")
         for friend, route in zip(table["friends"], station["routes"]):
-            print(f"        {friend} → {describe_route(route)}")
+            print(f"        {friend} → {describe_route(route)}  |  {route_summary(route)}")
         print(f"        (최대 {station['max_time']}분 · 합계 {station['total_time']}분 · 차이 {station['gap']}분)")
 
     for station in excluded:

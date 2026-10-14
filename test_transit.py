@@ -19,9 +19,34 @@ END = (37.37247, 126.94347)  # 테스트용 도착 좌표 (금정역)
 # ── 가짜 답장들 ──
 # 정상 답장 (실제 응답을 줄인 모양: 2호선 → 4호선, 40분)
 FAKE_OK = {"result": {"path": [
-    {"info": {"totalTime": 55, "payment": 1850, "busTransitCount": 1, "subwayTransitCount": 1}},
-    {"info": {"totalTime": 40, "payment": 1850, "busTransitCount": 0, "subwayTransitCount": 2}},
+    {"info": {"totalTime": 55, "payment": 1850, "busTransitCount": 1, "subwayTransitCount": 1},
+     "subPath": [
+         {"trafficType": 2, "sectionTime": 16, "stationCount": 8, "startName": "강남역9번출구", "endName": "이수역",
+          "lane": [{"busNo": "040"}, {"busNo": "N64"}]},
+     ]},
+    {"info": {"totalTime": 40, "payment": 1850, "busTransitCount": 0, "subwayTransitCount": 2},
+     "subPath": [
+         {"trafficType": 3, "sectionTime": 1, "distance": 37},
+         {"trafficType": 1, "sectionTime": 9, "stationCount": 4, "startName": "강남", "endName": "사당",
+          "lane": [{"name": "수도권 2호선"}]},
+         {"trafficType": 3, "sectionTime": 3, "distance": 0},
+         {"trafficType": 1, "sectionTime": 23, "stationCount": 10, "startName": "사당", "endName": "금정",
+          "lane": [{"name": "수도권 4호선"}]},
+         {"trafficType": 3, "sectionTime": 1, "distance": 14},
+     ]},
 ]}}
+
+# FAKE_OK에서 가장 빠른 경로(40분)를 정리하면 이렇게 나와야 해요
+EXPECTED_OK = {
+    "time_min": 40, "transfers": 1, "fare": 1850,
+    "segments": [
+        {"type": "walk", "minutes": 1, "distance_m": 37},
+        {"type": "subway", "line": "2호선", "start": "강남", "end": "사당", "minutes": 9, "stations": 4},
+        {"type": "walk", "minutes": 3, "distance_m": 0},
+        {"type": "subway", "line": "4호선", "start": "사당", "end": "금정", "minutes": 23, "stations": 10},
+        {"type": "walk", "minutes": 1, "distance_m": 14},
+    ],
+}
 # 틀린 API 키 (오늘 실제로 받아본 오류 응답과 똑같은 모양)
 FAKE_WRONG_KEY = {"error": [{"code": "500", "message": "[ApiKeyAuthFailed] ApiKey authentication failed."}]}
 # 너무 가까움
@@ -63,10 +88,34 @@ def test_cache():
     first = ask(postman)
     second = ask(postman)
 
-    assert first == {"time_min": 40, "transfers": 1, "fare": 1850}, first
+    assert first == EXPECTED_OK, first
     assert second == first  # 두 번째도 같은 결과
     assert postman.call_count == 1  # 우체부는 딱 1번만 일함
     assert transit.get_today_usage() == 1  # 기록부에도 1번만 적힘
+
+
+def test_segments_parsed():
+    """구간 정보: 호선 이름에서 "수도권 "을 빼고, 버스는 여러 번호를 함께 보여줘야 해요."""
+    result = transit.parse_transit_response(FAKE_OK)
+    assert result == EXPECTED_OK, result
+
+    bus = transit.parse_segments(FAKE_OK["result"]["path"][0]["subPath"])[0]
+    assert bus["type"] == "bus" and bus["line"] == "040/N64번", bus
+
+
+def test_old_cache_without_segments():
+    """경로 정보가 없는 예전 메모는 '없는 것'으로 보고 다시 물어본 뒤, 경로 정보까지 저장해야 해요."""
+    fresh_files()
+    old_memo = {"time_min": 40, "transfers": 1, "fare": 1850}  # 예전 모양 (segments 없음)
+    transit.write_json(transit.CACHE_PATH, {transit.make_cache_key(START, END): old_memo})
+    assert not transit.is_cached(START, END)  # 호출 수 미리 세기에서도 "필요함"으로 셈
+
+    postman = fake_postman(FAKE_OK)
+    result = ask(postman)
+
+    assert postman.call_count == 1  # 다시 물어봄
+    assert result == EXPECTED_OK
+    assert transit.is_cached(START, END)  # 이제는 경로 정보까지 저장됨
 
 
 def test_wrong_key():
@@ -130,7 +179,7 @@ def test_network_error():
 
 # 이 파일을 직접 실행하면 위의 테스트들을 차례로 실행합니다.
 if __name__ == "__main__":
-    tests = [test_cache, test_wrong_key, test_too_close, test_daily_limit, test_new_day, test_network_error]
+    tests = [test_cache, test_segments_parsed, test_old_cache_without_segments, test_wrong_key, test_too_close, test_daily_limit, test_new_day, test_network_error]
     for test in tests:
         test()  # 실패하면 여기서 AssertionError가 나며 멈춰요
         print(f"✅ {test.__name__}: {test.__doc__.strip().splitlines()[0]}")

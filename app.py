@@ -6,12 +6,18 @@
 
 import streamlit as st  # 파이썬 코드를 웹 화면으로 바꿔주는 도구
 
-from recommend import CRITERIA, DEFAULT_CRITERION, build_travel_table, describe_route, rank_stations
+from recommend import (
+    CRITERIA, DEFAULT_CRITERION, build_travel_table, describe_route,
+    rank_stations, route_details, route_summary,
+)
 from transit import DAILY_LIMIT, get_today_usage
 
-# 친구는 최대 3명까지 (ODsay 하루 30건 제한 때문)
+# 친구는 최소 2명, 최대 3명까지 (ODsay 하루 30건 제한 때문)
 MAX_FRIENDS = 3
 MIN_FRIENDS = 2
+
+# 결과 카드로 크게 보여줄 순위 개수 (나머지는 "다른 후보 보기"에 접어둬요)
+CARD_COUNT = 3
 
 # 기준별 이모지와 한 줄 설명 (화면에 보여줄 글자)
 CRITERION_EMOJI = {"care": "🧡", "fast": "⚡", "equal": "⚖️"}
@@ -27,17 +33,28 @@ CRITERION_ORDER = [DEFAULT_CRITERION] + [c for c in CRITERIA if c != DEFAULT_CRI
 # ─────────────────────────────────────────────
 # 사물함(session_state) 준비: 처음 열었을 때 한 번만 기본값을 넣어요.
 # ─────────────────────────────────────────────
-if "friend_count" not in st.session_state:
-    st.session_state.friend_count = MIN_FRIENDS  # 처음엔 입력칸 2개
+if "friend_ids" not in st.session_state:
+    # 친구마다 "번호표"를 줘요. 입력칸 이름(place_번호표)이 자리 순서와 상관없이 고정되어서,
+    # 가운데 친구를 지워도 다른 친구의 입력값이 밀리거나 섞이지 않아요.
+    st.session_state.friend_ids = list(range(MIN_FRIENDS))  # 처음엔 [0, 1] → 입력칸 2개
+    st.session_state.next_friend_id = MIN_FRIENDS  # 다음에 추가될 친구의 번호표
 if "table" not in st.session_state:
     st.session_state.table = None  # 이동시간 표 (아직 추천 전이라 비어 있음)
     st.session_state.table_places = []  # 그 표를 만들 때 쓴 출발지들
 
 
 def add_friend():
-    """'+ 친구 추가' 버튼을 누르면 입력칸을 하나 늘립니다. (최대 3칸)"""
-    if st.session_state.friend_count < MAX_FRIENDS:
-        st.session_state.friend_count += 1
+    """'+ 친구 추가' 버튼을 누르면 새 번호표를 가진 입력칸을 하나 늘립니다. (최대 3칸)"""
+    if len(st.session_state.friend_ids) < MAX_FRIENDS:
+        st.session_state.friend_ids.append(st.session_state.next_friend_id)
+        st.session_state.next_friend_id += 1
+
+
+def remove_friend(friend_id):
+    """'✕' 버튼을 누르면 그 번호표의 입력칸을 지웁니다. (최소 2칸은 남겨요)"""
+    if len(st.session_state.friend_ids) > MIN_FRIENDS:
+        st.session_state.friend_ids.remove(friend_id)
+        st.session_state.pop(f"place_{friend_id}", None)  # 지운 칸에 적혀 있던 글자도 정리
 
 
 def show_station_card(rank, station, friends):
@@ -48,14 +65,20 @@ def show_station_card(rank, station, friends):
         else:
             st.markdown(f"#### {rank}위 · {station['name']}역")
 
-        # 친구별 소요시간과 환승 횟수
+        # 친구별 소요시간·환승 횟수와 경로 요약 한 줄
         for friend, route in zip(friends, station["routes"]):
-            st.markdown(f"- **{friend}** → {describe_route(route)}")
+            st.markdown(f"**{friend}** → {describe_route(route)}  \n{route_summary(route)}")
 
         st.caption(
             f"가장 오래 걸리는 친구 {station['max_time']}분 · "
             f"합계 {station['total_time']}분 · 차이 {station['gap']}분"
         )
+
+        # 펼치면 구간별 자세한 경로가 보여요
+        with st.expander("자세한 경로 보기"):
+            for friend, route in zip(friends, station["routes"]):
+                st.markdown(f"**{friend}에서 출발**")
+                st.markdown("\n".join(f"- {line}" for line in route_details(route)))
 
 
 # ─────────────────────────────────────────────
@@ -65,21 +88,36 @@ st.title("🚇 오늘은여기서")
 st.write("친구들 모두에게 공정한 약속 장소 찾기")
 
 # ─────────────────────────────────────────────
-# 2. 친구 출발지 입력칸
+# 2. 친구 출발지 입력칸 (✕ 버튼은 3명일 때만 보여요)
 # ─────────────────────────────────────────────
 st.subheader("👥 친구들의 출발지")
 
+can_remove = len(st.session_state.friend_ids) > MIN_FRIENDS
 places = []  # 입력된 출발지들을 모을 리스트
-for i in range(st.session_state.friend_count):
-    text = st.text_input(f"친구 {i + 1} 출발지", key=f"place_{i}", placeholder="예: 강남역, 홍익대학교")
+
+for position, friend_id in enumerate(st.session_state.friend_ids):
+    label = f"친구 {position + 1} 출발지"
+    key = f"place_{friend_id}"  # 번호표로 만든 입력칸 이름
+
+    if can_remove:
+        # 입력칸(넓게)과 ✕ 버튼(좁게)을 한 줄에 나란히 놓아요
+        input_col, button_col = st.columns([6, 1], vertical_alignment="bottom")
+        with input_col:
+            text = st.text_input(label, key=key, placeholder="예: 강남역, 홍익대학교")
+        with button_col:
+            st.button("✕", key=f"remove_{friend_id}", on_click=remove_friend, args=(friend_id,),
+                      help="이 친구 삭제")
+    else:
+        text = st.text_input(label, key=key, placeholder="예: 강남역, 홍익대학교")
+
     places.append(text.strip())  # 앞뒤 공백은 지워요
 
 st.button(
     "+ 친구 추가",
     on_click=add_friend,
-    disabled=st.session_state.friend_count >= MAX_FRIENDS,  # 3명이면 더 못 누르게
+    disabled=len(st.session_state.friend_ids) >= MAX_FRIENDS,  # 3명이면 더 못 누르게
 )
-if st.session_state.friend_count >= MAX_FRIENDS:
+if len(st.session_state.friend_ids) >= MAX_FRIENDS:
     st.caption(f"대중교통 조회 한도(하루 {DAILY_LIMIT}건) 때문에 최대 {MAX_FRIENDS}명까지 입력할 수 있어요.")
 
 # ─────────────────────────────────────────────
@@ -107,6 +145,7 @@ if st.button("약속 장소 추천받기", type="primary"):
     else:
         try:
             # ODsay를 부를 수 있는 곳은 여기 한 군데뿐이에요. (버튼을 눌렀을 때만)
+            # 후보역 개수는 친구 수에 맞춰 자동으로 정해져요. (2명 → 5곳, 3명 → 3곳)
             with st.spinner("이동시간 계산 중..."):
                 table = build_travel_table(places)
             st.session_state.table = table  # 사물함에 이동시간 표 저장
@@ -124,15 +163,22 @@ table = st.session_state.table
 
 if table is not None:
     if st.session_state.table_places != places:
-        # 추천받은 뒤 출발지를 고쳤다면, 옛날 결과는 숨기고 안내합니다.
+        # 추천받은 뒤 출발지를 고쳤다면(친구 추가·삭제 포함), 옛날 결과는 숨기고 안내합니다.
         if not problem_shown:
             st.info("출발지가 바뀌었어요. '약속 장소 추천받기'를 다시 눌러주세요.")
     else:
         ranked, excluded = rank_stations(table, criterion)
 
         st.subheader(f"📍 추천 결과 · {CRITERION_EMOJI[criterion]} {CRITERIA[criterion]}")
-        for rank, station in enumerate(ranked, start=1):
+        for rank, station in enumerate(ranked[:CARD_COUNT], start=1):
             show_station_card(rank, station, table["friends"])
+
+        # 4위 이하는 스위치를 켜야 보여요.
+        # (카드 안에 이미 펼치기(expander)가 있어서, 펼치기 안에 또 펼치기를 넣을 수 없기 때문에 스위치를 써요)
+        others = ranked[CARD_COUNT:]
+        if others and st.toggle(f"다른 후보 보기 ({len(others)}곳)", key="show_others"):
+            for rank, station in enumerate(others, start=CARD_COUNT + 1):
+                show_station_card(rank, station, table["friends"])
 
         # 경로를 못 구해서 순위에서 빠진 역
         for station in excluded:

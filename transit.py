@@ -100,9 +100,20 @@ def make_cache_key(start, end):
     return f"{start[0]:.5f},{start[1]:.5f}->{end[0]:.5f},{end[1]:.5f}"
 
 
+def is_usable_cache(saved):
+    """
+    메모장의 기록을 그대로 써도 되는지 확인합니다.
+    - "경로 없음" 기록 → 써도 돼요
+    - 경로 정보(segments)가 있는 기록 → 써도 돼요
+    - 예전에 저장해서 경로 정보가 없는 기록 → 다시 물어봐야 해요
+    """
+    return "error" in saved or "segments" in saved
+
+
 def is_cached(start, end):
-    """이 구간이 메모장에 이미 적혀 있으면 True (= ODsay를 부르지 않아도 됨)"""
-    return make_cache_key(start, end) in read_json(CACHE_PATH, {})
+    """이 구간을 메모장에서 꺼내 쓸 수 있으면 True (= ODsay를 부르지 않아도 됨)"""
+    saved = read_json(CACHE_PATH, {}).get(make_cache_key(start, end))
+    return saved is not None and is_usable_cache(saved)
 
 
 # ─────────────────────────────────────────────
@@ -116,15 +127,19 @@ def get_transit_info(start, end):
     start, end: (위도, 경도) 형태의 좌표. get_coordinates()가 돌려주는 모양과 같아요.
 
     돌려주는 값 예시:
-        {"time_min": 40, "transfers": 1, "fare": 1850}
+        {"time_min": 40, "transfers": 1, "fare": 1850,
+         "segments": [ {"type": "walk", "minutes": 1, "distance_m": 37},
+                       {"type": "subway", "line": "2호선", "start": "강남", "end": "사당",
+                        "minutes": 9, "stations": 4}, ... ]}
 
     문제가 생기면 한국어 설명이 담긴 ValueError를 일으킵니다.
     """
     key = make_cache_key(start, end)
     cache = read_json(CACHE_PATH, {})
 
-    # 1) 메모장에 이미 적혀 있으면 ODsay를 부르지 않고 바로 돌려줍니다.
-    if key in cache:
+    # 1) 메모장에 쓸 수 있는 기록이 있으면 ODsay를 부르지 않고 바로 돌려줍니다.
+    #    (경로 정보가 없는 예전 기록이면 아래로 내려가서 다시 물어봐요)
+    if key in cache and is_usable_cache(cache[key]):
         saved = cache[key]
         if "error" in saved:  # "경로 없음"이 적혀 있던 구간
             raise NoRouteError(saved["error"])
@@ -210,11 +225,45 @@ def parse_transit_response(data):
             "time_min": info["totalTime"],  # 총 소요시간(분)
             "transfers": transfers,  # 환승 횟수
             "fare": info["payment"],  # 요금(원)
+            "segments": parse_segments(path.get("subPath", [])),  # 구간별 경로 안내
         })
 
     # 가장 좋은 경로 = 시간이 가장 짧은 경로 (시간이 같으면 환승이 적은 쪽)
     best = min(options, key=lambda o: (o["time_min"], o["transfers"]))
     return best
+
+
+def parse_segments(sub_paths):
+    """
+    ODsay의 구간 목록(subPath)을 우리가 쓰기 쉬운 모양으로 바꿉니다.
+    trafficType: 1 = 지하철, 2 = 버스, 3 = 도보
+    """
+    segments = []
+    for sub in sub_paths:
+        kind = sub.get("trafficType")
+        minutes = sub.get("sectionTime", 0)  # 이 구간에 걸리는 시간(분)
+
+        if kind == 3:  # 도보
+            segments.append({"type": "walk", "minutes": minutes, "distance_m": sub.get("distance", 0)})
+            continue
+
+        lanes = sub.get("lane", [])  # 이 구간을 다니는 노선 목록
+        if kind == 1:  # 지하철: "수도권 2호선" → "2호선"
+            line = lanes[0]["name"].replace("수도권 ", "") if lanes else "지하철"
+            seg_type = "subway"
+        else:  # 버스: 같은 정류장 사이를 다니는 버스가 여러 대일 수 있어서 3개까지 함께 보여줘요
+            line = "/".join(lane["busNo"] for lane in lanes[:3]) + "번" if lanes else "버스"
+            seg_type = "bus"
+
+        segments.append({
+            "type": seg_type,
+            "line": line,  # 호선 또는 버스 번호
+            "start": sub.get("startName", ""),  # 타는 역(정류장)
+            "end": sub.get("endName", ""),  # 내리는 역(정류장)
+            "minutes": minutes,
+            "stations": sub.get("stationCount", 0),  # 몇 정거장 가는지
+        })
+    return segments
 
 
 def explain_odsay_error(error):

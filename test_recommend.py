@@ -3,7 +3,22 @@
 #
 # ⚠️ 순위 함수는 ODsay를 부르지 않아요. 여기서는 가짜 표만 쓰기 때문에 호출 0번이에요.
 
-from recommend import rank_stations
+from recommend import candidate_count, rank_stations, route_details, route_summary
+
+# 가짜 경로: 강남 → [2호선] → 사당 → [4호선] → 금정 (같은 역에서 환승)
+SUBWAY_ROUTE = {"time_min": 40, "transfers": 1, "segments": [
+    {"type": "walk", "minutes": 1, "distance_m": 37},
+    {"type": "subway", "line": "2호선", "start": "강남", "end": "사당", "minutes": 9, "stations": 4},
+    {"type": "walk", "minutes": 0, "distance_m": 0},
+    {"type": "subway", "line": "4호선", "start": "사당", "end": "금정", "minutes": 23, "stations": 10},
+]}
+
+# 가짜 경로: 버스에서 내린 곳(이수역 정류장)과 지하철 타는 곳(이수)이 다른 경우
+BUS_ROUTE = {"time_min": 48, "transfers": 1, "segments": [
+    {"type": "bus", "line": "040/N64번", "start": "강남역9번출구", "end": "이수역", "minutes": 16, "stations": 8},
+    {"type": "walk", "minutes": 4, "distance_m": 250},
+    {"type": "subway", "line": "4호선", "start": "이수", "end": "금정", "minutes": 25, "stations": 11},
+]}
 
 
 def make_table(stations):
@@ -106,6 +121,42 @@ def test_excluded_station():
         assert "친구2" in excluded[0]["reason"]  # 누구 경로가 문제인지 알려줌
 
 
+def test_candidate_count():
+    """후보 개수: 친구 2명 → 5곳, 3명 → 3곳. 한 번 검색에 ODsay 호출이 10건을 넘으면 안 돼요."""
+    assert candidate_count(2) == 5
+    assert candidate_count(3) == 3
+    for friends in [2, 3]:
+        assert friends * candidate_count(friends) <= 10
+
+
+def test_route_summary_subway():
+    """경로 요약: 같은 역에서 갈아타면 '사당 (환승)'처럼 한 번만 보여줘요."""
+    assert route_summary(SUBWAY_ROUTE) == "강남 → [2호선] → 사당 (환승) → [4호선] → 금정"
+
+
+def test_route_summary_bus_to_subway():
+    """경로 요약: 내린 곳과 타는 곳이 다르면 타는 곳도 보여줘요."""
+    assert route_summary(BUS_ROUTE) == "강남역9번출구 → [040/N64번] → 이수역 (환승) → 이수 → [4호선] → 금정"
+
+
+def test_route_details():
+    """자세한 경로: 구간마다 한 줄씩, 0분 도보는 생략해요."""
+    assert route_details(SUBWAY_ROUTE) == [
+        "🚶 도보 1분 (37m)",
+        "🚇 2호선 강남 → 사당 (4개 역, 9분)",
+        "🚇 4호선 사당 → 금정 (10개 역, 23분)",
+    ]
+    assert route_details(BUS_ROUTE)[0] == "🚌 040/N64번 강남역9번출구 → 이수역 (8개 정류장, 16분)"
+
+
+def test_route_walk_and_error():
+    """걸어가는 경로와 못 구한 경로도 멈추지 않고 문구로 보여줘요."""
+    walk = {"time_min": 7, "transfers": 0, "walk": True}
+    assert route_summary(walk) == "걸어서 7분"
+    assert route_details(walk) == ["🚶 출발지에서 역까지 걸어서 7분"]
+    assert route_summary({"error": "경로를 찾을 수 없어요."}) == "경로 없음"
+
+
 def test_unknown_criterion():
     """없는 기준을 넣으면 친절한 안내가 나와야 해요."""
     table = make_table({"정상역": [40, 50]})
@@ -120,7 +171,9 @@ def test_unknown_criterion():
 if __name__ == "__main__":
     tests = [
         test_equal_not_both_90, test_equal_gap_order, test_equal_no_rock_paper_scissors,
-        test_care, test_fast, test_default_is_care, test_excluded_station, test_unknown_criterion,
+        test_care, test_fast, test_default_is_care, test_excluded_station,
+        test_candidate_count, test_route_summary_subway, test_route_summary_bus_to_subway,
+        test_route_details, test_route_walk_and_error, test_unknown_criterion,
     ]
     for test in tests:
         test()  # 실패하면 여기서 AssertionError가 나며 멈춰요
