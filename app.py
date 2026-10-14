@@ -4,11 +4,13 @@
 # Streamlit은 버튼을 누르거나 선택을 바꿀 때마다 이 파일을 "처음부터 다시" 실행해요.
 # 그래서 다시 실행돼도 남아 있어야 하는 값(이동시간 표 등)은 st.session_state(사물함)에 넣어둡니다.
 
+import html  # 사용자가 입력한 글자를 HTML에 안전하게 넣기 위한 도구
+
 import streamlit as st  # 파이썬 코드를 웹 화면으로 바꿔주는 도구
 
 from recommend import (
-    CRITERIA, DEFAULT_CRITERION, build_travel_table, describe_route,
-    rank_stations, route_details, route_summary,
+    CRITERIA, DEFAULT_CRITERION, build_travel_table,
+    rank_stations, route_details, route_summary, same_top_station,
 )
 from transit import DAILY_LIMIT, get_today_usage
 
@@ -20,14 +22,28 @@ MIN_FRIENDS = 2
 CARD_COUNT = 3
 
 # 기준별 이모지와 한 줄 설명 (화면에 보여줄 글자)
-CRITERION_EMOJI = {"care": "🧡", "fast": "⚡", "equal": "⚖️"}
+CRITERION_EMOJI = {"fair": "⚖️", "fast": "⚡"}
 CRITERION_HELP = {
-    "care": "가장 오래 걸리는 친구의 이동시간을 가장 짧게 만들어요",
-    "fast": "모든 친구의 이동시간을 더한 값이 가장 작은 곳을 골라요",
-    "equal": "친구들끼리 걸리는 시간이 최대한 비슷한 곳을 골라요",
+    "fair": "누구 한 명만 오래 걸리지 않게",
+    "fast": "다 같이 이동하는 시간의 합이 가장 짧게",
 }
 
-# 기본 기준(care)이 라디오 버튼의 첫 번째가 되도록 순서를 정합니다.
+# 이동시간 막대의 색 (밝은 화면과 어두운 화면 모두에서 잘 보이는 파랑)
+BAR_COLOR = "#2a78d6"
+
+# 막대 그래프의 모양 (한 번만 넣어두면 모든 카드의 막대에 적용돼요)
+BAR_STYLE = """
+<style>
+.travel-bars { display: grid; grid-template-columns: minmax(4.5em, 28%) 1fr; gap: 6px 10px;
+               align-items: center; margin: 4px 0 8px; }
+.travel-bars .who { font-size: 0.9rem; overflow-wrap: anywhere; }
+.travel-bars .track { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.travel-bars .bar { height: 14px; border-radius: 0 4px 4px 0; flex: none; }
+.travel-bars .value { font-size: 0.85rem; white-space: nowrap; opacity: 0.8; }
+</style>
+"""
+
+# 기본 기준(fair)이 라디오 버튼의 첫 번째가 되도록 순서를 정합니다.
 CRITERION_ORDER = [DEFAULT_CRITERION] + [c for c in CRITERIA if c != DEFAULT_CRITERION]
 
 # ─────────────────────────────────────────────
@@ -57,7 +73,28 @@ def remove_friend(friend_id):
         st.session_state.pop(f"place_{friend_id}", None)  # 지운 칸에 적혀 있던 글자도 정리
 
 
-def show_station_card(rank, station, friends):
+def travel_bars_html(friends, routes, scale_max):
+    """
+    친구별 이동시간을 가로 막대 HTML로 만듭니다.
+    scale_max: 막대 길이의 기준(분). 모든 카드가 같은 기준을 써야 카드끼리 비교가 공정해요.
+    """
+    rows = []
+    for friend, route in zip(friends, routes):
+        name = html.escape(friend)  # 사용자가 입력한 글자는 반드시 안전하게 바꿔서 넣어요
+        detail = "도보" if route.get("walk") else f"환승 {route['transfers']}"
+        label = f"{route['time_min']}분 · {detail}"  # 예: "28분 · 환승 1", "7분 · 도보"
+        # 막대는 칸의 최대 80%까지만 → 오른쪽에 "28분 · 환승 1" 글자가 들어갈 자리를 남겨요
+        width = 80 * route["time_min"] / scale_max if scale_max else 0
+        rows.append(
+            f'<div class="who">{name}</div>'
+            f'<div class="track" title="{name} → {label}">'
+            f'<div class="bar" style="width:{width:.1f}%; background:{BAR_COLOR}"></div>'
+            f'<span class="value">{label}</span></div>'
+        )
+    return f'<div class="travel-bars">{"".join(rows)}</div>'
+
+
+def show_station_card(rank, station, friends, scale_max):
     """후보역 하나를 카드(테두리 상자) 모양으로 보여줍니다."""
     with st.container(border=True):
         if rank == 1:
@@ -65,9 +102,12 @@ def show_station_card(rank, station, friends):
         else:
             st.markdown(f"#### {rank}위 · {station['name']}역")
 
-        # 친구별 소요시간·환승 횟수와 경로 요약 한 줄
+        # 친구별 이동시간 가로 막대 (차이가 한눈에 보이게)
+        st.markdown(travel_bars_html(friends, station["routes"], scale_max), unsafe_allow_html=True)
+
+        # 친구별 경로 요약 한 줄
         for friend, route in zip(friends, station["routes"]):
-            st.markdown(f"**{friend}** → {describe_route(route)}  \n{route_summary(route)}")
+            st.markdown(f"**{friend}** · {route_summary(route)}")
 
         st.caption(
             f"가장 오래 걸리는 친구 {station['max_time']}분 · "
@@ -84,6 +124,7 @@ def show_station_card(rank, station, friends):
 # ─────────────────────────────────────────────
 # 1. 제목과 소개
 # ─────────────────────────────────────────────
+st.markdown(BAR_STYLE, unsafe_allow_html=True)  # 막대 그래프 모양 넣기
 st.title("🚇 오늘은여기서")
 st.write("친구들 모두에게 공정한 약속 장소 찾기")
 
@@ -169,16 +210,24 @@ if table is not None:
     else:
         ranked, excluded = rank_stations(table, criterion)
 
+        # 막대 길이의 기준 = 순위에 든 모든 역 중 가장 오래 걸리는 시간 (모든 카드가 같은 기준)
+        scale_max = max((s["max_time"] for s in ranked), default=0)
+
         st.subheader(f"📍 추천 결과 · {CRITERION_EMOJI[criterion]} {CRITERIA[criterion]}")
+
+        # 두 기준의 1위가 같으면 알려줘요
+        if same_top_station(table):
+            st.success("두 기준 모두 같은 역을 추천해요. 모두에게 좋은 장소예요! 👍")
+
         for rank, station in enumerate(ranked[:CARD_COUNT], start=1):
-            show_station_card(rank, station, table["friends"])
+            show_station_card(rank, station, table["friends"], scale_max)
 
         # 4위 이하는 스위치를 켜야 보여요.
         # (카드 안에 이미 펼치기(expander)가 있어서, 펼치기 안에 또 펼치기를 넣을 수 없기 때문에 스위치를 써요)
         others = ranked[CARD_COUNT:]
         if others and st.toggle(f"다른 후보 보기 ({len(others)}곳)", key="show_others"):
             for rank, station in enumerate(others, start=CARD_COUNT + 1):
-                show_station_card(rank, station, table["friends"])
+                show_station_card(rank, station, table["friends"], scale_max)
 
         # 경로를 못 구해서 순위에서 빠진 역
         for station in excluded:

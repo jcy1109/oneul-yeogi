@@ -19,7 +19,7 @@ import transit
 real_get = requests.get  # 바꿔치기하기 전에 진짜 우체부를 따로 챙겨둡니다.
 
 # 가짜 이동시간 표: 강남역 + 수원역 → 후보 5곳
-# (fast로 바꾸면 사당이 1위, care는 금정이 1위가 되도록 만든 숫자예요)
+# (fair는 금정이 1위, fast로 바꾸면 사당이 1위가 되도록 만든 숫자예요)
 GANGNAM_GEUMJEONG = {"time_min": 40, "transfers": 1, "segments": [
     {"type": "walk", "minutes": 1, "distance_m": 37},
     {"type": "subway", "line": "2호선", "start": "강남", "end": "사당", "minutes": 9, "stations": 4},
@@ -87,14 +87,15 @@ def remove_buttons(at):
 # ─────────────────────────────────────────────
 
 def test_first_screen():
-    """처음 화면: 제목, 입력칸 2개, ✕ 없음, 기본 기준 care, 사용량 표시"""
+    """처음 화면: 제목, 입력칸 2개, ✕ 없음, 기본 기준 fair, 사용량 표시"""
     at = open_app()
     text = all_text(at)
     assert "🚇 오늘은여기서" in text
     assert "친구들 모두에게 공정한 약속 장소 찾기" in text
     assert len(at.text_input) == 2
     assert len(remove_buttons(at)) == 0  # 2명일 땐 ✕ 숨김
-    assert at.radio[0].value == "care"
+    assert at.radio[0].value == "fair"
+    assert at.radio[0].options == ["⚖️ 공평하게", "⚡ 빠르게"]  # 기준은 2개
     assert f"오늘 ODsay 사용량: {transit.get_today_usage()}/30건" in text
 
 
@@ -157,8 +158,9 @@ def test_result_cards_and_switch_criterion():
         assert not at.exception, at.exception
 
         text = all_text(at)
-        assert "🏆 1위 · 금정역" in text  # care 기준 1위
-        assert "**강남역** → 40분(환승 1)" in text
+        assert "🏆 1위 · 금정역" in text  # fair 기준 1위
+        assert "40분 · 환승 1" in text  # 막대 옆 글자
+        assert "**강남역** · 강남 → [2호선]" in text  # 친구별 경로 요약
         assert "강남 → [2호선] → 사당 (환승) → [4호선] → 금정" in text  # 카드의 경로 요약
         assert "🚇 2호선 강남 → 사당 (4개 역, 9분)" in text  # 펼치기 안의 자세한 경로
         assert at.expander[0].label == "자세한 경로 보기"
@@ -171,7 +173,9 @@ def test_result_cards_and_switch_criterion():
         # 기준을 fast로 바꾸면 사당이 1위, 그리고 이동시간 표는 다시 만들지 않음
         at = at.radio[0].set_value("fast").run()
         assert not at.exception, at.exception
-        assert "🏆 1위 · 사당역" in all_text(at)
+        text = all_text(at)
+        assert "🏆 1위 · 사당역" in text
+        assert "두 기준 모두 같은 역을 추천해요" not in all_success(at)  # 1위가 다르니까 안내 없음
         assert fake_build.call_count == 1  # 버튼을 누른 1번뿐!
 
         # 친구를 추가하면(출발지 변경) 옛 결과는 숨기고 안내
@@ -179,6 +183,59 @@ def test_result_cards_and_switch_criterion():
         text = all_text(at)
         assert "출발지가 바뀌었어요" in text
         assert "🏆" not in text
+
+
+def show_result(table, names=("강남역", "수원역")):
+    """가짜 이동시간 표로 추천 결과 화면을 띄워줍니다."""
+    with mock.patch("recommend.build_travel_table", mock.Mock(return_value=table)):
+        at = open_app()
+        for box, name in zip(at.text_input, names):
+            box.input(name)
+        return click(at, "약속 장소 추천받기")
+
+
+def bar_rows(at):
+    """화면의 막대 그래프 HTML들만 모아줍니다."""
+    return [m.value for m in at.markdown if 'class="travel-bars"' in m.value]
+
+
+def all_success(at):
+    """초록 안내 상자(st.success)의 글자들"""
+    return "\n".join(str(s.value) for s in at.success)
+
+
+def test_travel_bars():
+    """카드마다 친구 수만큼 막대가 있고, 모든 카드가 같은 눈금을 써야 해요."""
+    at = show_result(FAKE_TABLE)
+    bars = bar_rows(at)
+    assert len(bars) == 3  # 1~3위 카드마다 막대 그래프 1개
+    assert all(b.count('class="bar"') == 2 for b in bars)  # 친구 2명 → 막대 2개
+
+    # 눈금 기준 = 순위에 든 역 중 가장 긴 시간(판교 50분) → 50분은 80%, 40분은 64%
+    assert "width:64.0%" in bars[0]  # 1위 금정, 강남역 40분
+    at = at.toggle(key="show_others").set_value(True).run()
+    assert any("width:80.0%" in b for b in bar_rows(at))  # 판교 50분 (4위 이하)
+
+
+def test_same_winner_message():
+    """두 기준의 1위가 같은 역이면 '모두에게 좋은 장소' 안내가 나와야 해요."""
+    table = {"friends": ["강남역", "수원역"], "stations": [
+        {"name": "과천", "routes": [{"time_min": 28, "transfers": 1}, {"time_min": 31, "transfers": 1}]},
+        {"name": "정자", "routes": [{"time_min": 21, "transfers": 0}, {"time_min": 41, "transfers": 0}]},
+    ]}
+    at = show_result(table)
+    assert "두 기준 모두 같은 역을 추천해요. 모두에게 좋은 장소예요! 👍" in all_success(at)
+
+
+def test_friend_name_is_escaped():
+    """친구 이름에 HTML 글자가 있어도, 막대 그래프 안에서 그대로 실행되지 않고 글자로만 보여야 해요."""
+    table = {"friends": ["<b>해킹</b>", "수원역"], "stations": [
+        {"name": "과천", "routes": [{"time_min": 28, "transfers": 1}, {"time_min": 31, "transfers": 1}]},
+    ]}
+    at = show_result(table, names=("<b>해킹</b>", "수원역"))
+    bars = bar_rows(at)[0]
+    assert "&lt;b&gt;해킹&lt;/b&gt;" in bars
+    assert "<b>해킹</b>" not in bars
 
 
 def test_place_not_found():
@@ -216,7 +273,8 @@ if __name__ == "__main__":
 
     tests = [
         test_first_screen, test_add_friend_max_3, test_remove_middle_friend, test_remove_then_add,
-        test_empty_input, test_result_cards_and_switch_criterion, test_place_not_found, test_daily_limit_reached,
+        test_empty_input, test_result_cards_and_switch_criterion, test_travel_bars, test_same_winner_message,
+        test_friend_name_is_escaped, test_place_not_found, test_daily_limit_reached,
     ]
     # 모든 테스트 동안 ODsay 우체부를 막아둡니다.
     with mock.patch("transit.requests.get", odsay_forbidden):

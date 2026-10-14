@@ -3,7 +3,7 @@
 #
 # ⚠️ 순위 함수는 ODsay를 부르지 않아요. 여기서는 가짜 표만 쓰기 때문에 호출 0번이에요.
 
-from recommend import candidate_count, rank_stations, route_details, route_summary
+from recommend import candidate_count, rank_stations, route_details, route_summary, same_top_station
 
 # 가짜 경로: 강남 → [2호선] → 사당 → [4호선] → 금정 (같은 역에서 환승)
 SUBWAY_ROUTE = {"time_min": 40, "transfers": 1, "segments": [
@@ -49,46 +49,32 @@ def names(table, criterion):
 # 테스트들
 # ─────────────────────────────────────────────
 
-def test_equal_not_both_90():
-    """[중요] 둘 다 90분(차이 0분)인 역이 equal에서 1위가 되면 안 돼요."""
+def test_fair_longest_first():
+    """fair: 가장 오래 걸리는 친구의 시간이 짧은 역이 위로 가요."""
     table = make_table({
-        "모두90분역": [90, 90],  # 차이 0분, 최대 90분 → 공평하지만 둘 다 고생
-        "적당역": [40, 48],  # 차이 8분, 최대 48분 → 거의 공평하고 훨씬 빠름
-        "치우친역": [20, 70],  # 차이 50분
+        "최대60역": [55, 60],
+        "최대50역": [45, 50],
+        "최대70역": [10, 70],
     })
-    result = names(table, "equal")
-    assert result[0] != "모두90분역", result
-    assert result == ["적당역", "모두90분역", "치우친역"], result
+    assert names(table, "fair") == ["최대50역", "최대60역", "최대70역"]
 
 
-def test_equal_gap_order():
-    """equal: 차이가 10분보다 많이 나면, 차이가 작은 역이 위로 가야 해요."""
+def test_fair_tie_smaller_gap():
+    """fair: 가장 오래 걸리는 시간이 같으면, 친구 간 차이가 작은 역이 위로 가요. (합계는 더 커도요)"""
     table = make_table({
-        "차이30역": [30, 60],  # 최대 60분이지만 차이 30분
-        "차이5역": [55, 60],  # 최대 60분, 차이 5분
+        "최대60_차40": [20, 60],  # 합계 80
+        "최대60_차20": [40, 60],  # 합계 100 → 합계는 크지만 더 공평해서 위로
     })
-    assert names(table, "equal") == ["차이5역", "차이30역"]
+    assert names(table, "fair") == ["최대60_차20", "최대60_차40"]
 
 
-def test_equal_no_rock_paper_scissors():
-    """equal: 두 개씩 비교하면 꼬이는 경우(가위바위보)에도 순서가 하나로 정해져야 해요."""
+def test_fair_not_both_90():
+    """fair: 둘 다 90분(차이 0분)인 역보다, 조금 차이 나도 훨씬 빠른 역이 위로 가야 해요."""
     table = make_table({
-        "A역": [90, 90],  # 차이 0, 최대 90
-        "B역": [42, 50],  # 차이 8, 최대 50  (A와 10분 이내 → 같은 그룹)
-        "C역": [25, 40],  # 차이 15, 최대 40 (A와 10분 넘게 차이 → 다음 그룹)
+        "모두90분역": [90, 90],
+        "적당역": [40, 48],
     })
-    # 첫 그룹(A, B)에서 최대 시간이 짧은 B → A, 그다음 그룹 C
-    assert names(table, "equal") == ["B역", "A역", "C역"]
-
-
-def test_care():
-    """care: 가장 오래 걸리는 친구의 시간이 짧은 순. 같으면 합계가 작은 순."""
-    table = make_table({
-        "최대60_합100": [40, 60],
-        "최대60_합80": [20, 60],
-        "최대50_합95": [45, 50],
-    })
-    assert names(table, "care") == ["최대50_합95", "최대60_합80", "최대60_합100"]
+    assert names(table, "fair")[0] == "적당역"
 
 
 def test_fast():
@@ -98,14 +84,26 @@ def test_fast():
         "합95": [45, 50],
     })
     assert names(table, "fast") == ["합80", "합95"]
-    assert names(table, "care") == ["합95", "합80"]  # 같은 표라도 care는 반대!
+    assert names(table, "fair") == ["합95", "합80"]  # 같은 표라도 fair는 반대!
 
 
-def test_default_is_care():
-    """기준을 안 고르면 care로 정렬돼야 해요."""
+def test_default_is_fair():
+    """기준을 안 고르면 fair로 정렬돼야 해요."""
     table = make_table({"합80": [10, 70], "합95": [45, 50]})
     ranked, _ = rank_stations(table)
-    assert [s["name"] for s in ranked] == names(table, "care")
+    assert [s["name"] for s in ranked] == names(table, "fair")
+
+
+def test_same_top_station():
+    """두 기준의 1위가 같으면 그 역 이름을, 다르면 None을 돌려줘요."""
+    same = make_table({"좋은역": [30, 31], "나쁜역": [40, 50]})  # 둘 다 좋은역이 1위
+    assert same_top_station(same) == "좋은역"
+
+    different = make_table({"합80": [10, 70], "합95": [45, 50]})  # fair는 합95, fast는 합80
+    assert same_top_station(different) is None
+
+    nothing = make_table({"못가는역": [30, "X"]})  # 순위에 든 역이 없으면 비교할 수 없음
+    assert same_top_station(nothing) is None
 
 
 def test_excluded_station():
@@ -114,7 +112,7 @@ def test_excluded_station():
         "정상역": [40, 50],
         "못가는역": [30, "X"],
     })
-    for criterion in ["care", "fast", "equal"]:
+    for criterion in ["fair", "fast"]:
         ranked, excluded = rank_stations(table, criterion)
         assert [s["name"] for s in ranked] == ["정상역"]
         assert excluded[0]["name"] == "못가는역"
@@ -161,7 +159,7 @@ def test_unknown_criterion():
     """없는 기준을 넣으면 친절한 안내가 나와야 해요."""
     table = make_table({"정상역": [40, 50]})
     try:
-        rank_stations(table, "cheap")
+        rank_stations(table, "care")  # 예전에 있던 기준이지만 이제는 없어요
         assert False, "오류가 나야 하는데 안 났어요"
     except ValueError as error:
         assert "알 수 없는 기준" in str(error)
@@ -170,8 +168,8 @@ def test_unknown_criterion():
 # 이 파일을 직접 실행하면 위의 테스트들을 차례로 실행합니다.
 if __name__ == "__main__":
     tests = [
-        test_equal_not_both_90, test_equal_gap_order, test_equal_no_rock_paper_scissors,
-        test_care, test_fast, test_default_is_care, test_excluded_station,
+        test_fair_longest_first, test_fair_tie_smaller_gap, test_fair_not_both_90,
+        test_fast, test_default_is_fair, test_same_top_station, test_excluded_station,
         test_candidate_count, test_route_summary_subway, test_route_summary_bus_to_subway,
         test_route_details, test_route_walk_and_error, test_unknown_criterion,
     ]

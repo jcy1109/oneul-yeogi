@@ -13,16 +13,12 @@ from transit import DAILY_LIMIT, NoRouteError, get_remaining_calls, get_transit_
 
 # 공정성 기준: 코드에서 쓰는 이름 → 사용자에게 보여줄 이름
 CRITERIA = {
-    "care": "멀리 오는 친구 배려",
-    "fast": "다 같이 빨리",
-    "equal": "똑같이 나누기",
+    "fair": "공평하게",
+    "fast": "빠르게",
 }
 
-# 기본 기준. 이 서비스는 "경기도 친구가 항상 멀리 오는 문제"를 해결하려고 만들었으므로 care가 기본이에요.
-DEFAULT_CRITERION = "care"
-
-# equal 기준에서 "시간 차이가 비슷하다"고 보는 범위 (분)
-EQUAL_SIMILAR_MIN = 10
+# 기본 기준. 이 서비스는 "경기도 친구가 항상 멀리 오는 문제"를 해결하려고 만들었으므로 fair가 기본이에요.
+DEFAULT_CRITERION = "fair"
 
 # 출발지가 역에서 이 거리(km) 이내면 ODsay 대신 걸어가는 시간으로 계산해요.
 # (ODsay도 700m 이내는 "너무 가깝다"며 경로를 주지 않아요)
@@ -182,45 +178,30 @@ def rank_stations(table, criterion=DEFAULT_CRITERION):
             "gap": max(times) - min(times),  # 가장 오래 걸리는 친구와 가장 빨리 오는 친구의 차이
         })
 
-    if criterion == "care":
-        # 가장 오래 걸리는 친구의 시간이 짧은 순 → 같으면 합계가 작은 순
-        ranked.sort(key=lambda s: (s["max_time"], s["total_time"]))
-    elif criterion == "fast":
-        # 합계가 작은 순 → 같으면 가장 오래 걸리는 친구의 시간이 짧은 순
+    if criterion == "fair":
+        # 가장 오래 걸리는 친구의 시간이 짧은 순 → 같으면 친구 간 시간 차이가 작은 순
+        # (그래도 같으면 합계가 작은 순으로, 순서가 매번 똑같이 나오게 해요)
+        ranked.sort(key=lambda s: (s["max_time"], s["gap"], s["total_time"]))
+    else:  # "fast"
+        # 모든 친구의 시간 합계가 작은 순
+        # (같으면 가장 오래 걸리는 친구의 시간이 짧은 순으로, 순서가 매번 똑같이 나오게 해요)
         ranked.sort(key=lambda s: (s["total_time"], s["max_time"]))
-    else:  # "equal"
-        ranked = sort_equal(ranked)
 
     return ranked, excluded
 
 
-def sort_equal(stations):
+def same_top_station(table):
     """
-    "똑같이 나누기" 기준으로 정렬합니다.
-
-    그냥 "차이 작은 순"으로만 정렬하면, 둘 다 90분 걸리는 역(차이 0분)이 1위가 되어버려요.
-    그래서 차이가 비슷한(10분 이내) 역들은 한 그룹으로 묶고,
-    그룹 안에서는 "가장 오래 걸리는 친구의 시간"이 짧은 역을 위로 올립니다.
-
-    방법:
-      1) 남은 역 중 차이가 가장 작은 역을 찾고,
-      2) 그 역과 차이 간격이 10분 이내인 역들을 한 그룹으로 묶어서,
-      3) 그룹 안을 (최대 시간 → 합계) 순으로 정렬해 결과에 붙이고,
-      4) 남은 역으로 1)부터 반복합니다.
-    (역 두 개씩 따로 비교하면 가위바위보처럼 순서가 꼬일 수 있어서, 이렇게 그룹으로 정해요)
+    두 기준(fair, fast)의 1위가 같은 역이면 그 역 이름을, 다르면 None을 돌려줍니다.
+    (같으면 "모두에게 좋은 장소"라고 안내하는 데 써요)
     """
-    remaining = sorted(stations, key=lambda s: s["gap"])  # 차이 작은 순으로 줄 세우기
-    result = []
-
-    while remaining:
-        smallest_gap = remaining[0]["gap"]
-        group = [s for s in remaining if s["gap"] <= smallest_gap + EQUAL_SIMILAR_MIN]
-        remaining = [s for s in remaining if s["gap"] > smallest_gap + EQUAL_SIMILAR_MIN]
-
-        group.sort(key=lambda s: (s["max_time"], s["total_time"]))
-        result.extend(group)
-
-    return result
+    winners = set()
+    for criterion in CRITERIA:
+        ranked, _ = rank_stations(table, criterion)
+        if not ranked:  # 순위에 든 역이 하나도 없으면 비교할 수 없어요
+            return None
+        winners.add(ranked[0]["name"])
+    return winners.pop() if len(winners) == 1 else None
 
 
 # ─────────────────────────────────────────────
@@ -350,7 +331,9 @@ if __name__ == "__main__":
         if answer.strip().lower() == "y":
             table = build_travel_table(places)
             print_side_by_side(table)
-            print_ranking(table)  # 기본 기준(care)으로 자세히
+            if same_top_station(table):
+                print(f"\n👍 두 기준 모두 같은 역({same_top_station(table)})을 추천해요. 모두에게 좋은 장소예요!")
+            print_ranking(table)  # 기본 기준(fair)으로 자세히
             print(f"\n📞 오늘 남은 ODsay 호출: {get_remaining_calls()}번")
         else:
             print("취소했어요. ODsay는 부르지 않았어요.")
