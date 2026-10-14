@@ -40,20 +40,15 @@ def load_stations():
         return json.load(f)
 
 
-def get_candidates(start_places, top_n=3):
+def geocode_places(start_places):
     """
-    출발지 이름 리스트를 받아서, 중심점에서 가까운 후보역 top_n개를 돌려줍니다.
-
-    돌려주는 값 예시:
-        [{"name": "사당", "distance_km": 3.2}, {"name": "양재", "distance_km": 4.1}, ...]
-
-    출발지를 찾을 수 없으면 친절한 메시지를 담은 ValueError를 일으킵니다.
+    출발지 이름 리스트를 좌표 리스트로 바꿉니다. (순서는 입력과 같아요)
+    찾을 수 없는 곳이 있으면 전부 모아서 친절한 메시지를 담은 ValueError를 일으킵니다.
     """
     # 출발지가 하나도 없으면 계산할 수 없으므로 알려줍니다.
     if not start_places:
         raise ValueError("출발지를 한 곳 이상 입력해주세요.")
 
-    # 1단계: 출발지 이름 → 좌표
     coords = []  # 찾은 좌표를 담을 리스트
     not_found = []  # 못 찾은 출발지 이름을 담을 리스트
 
@@ -64,24 +59,50 @@ def get_candidates(start_places, top_n=3):
         else:
             coords.append(result)
 
-    # 2단계: 못 찾은 곳이 있으면, 전부 모아서 한 번에 친절하게 알려줍니다.
+    # 못 찾은 곳이 있으면, 전부 모아서 한 번에 친절하게 알려줍니다.
     if not_found:
         names = ", ".join(f"'{p}'" for p in not_found)
         raise ValueError(f"{names}을(를) 찾을 수 없어요. 이름을 다시 확인해주세요.")
 
-    # 3단계: 중심점 = 모든 위도의 평균, 모든 경도의 평균
+    return coords
+
+
+def pick_nearest_stations(coords, top_n=3):
+    """
+    출발지 좌표 리스트를 받아서, 중심점에서 가까운 후보역 top_n개를 돌려줍니다.
+
+    돌려주는 값 예시:
+        [{"name": "사당", "distance_km": 3.2, "lat": 37.47, "lng": 126.98}, ...]
+    """
+    # 중심점 = 모든 위도의 평균, 모든 경도의 평균
     center_lat = sum(lat for lat, lng in coords) / len(coords)
     center_lng = sum(lng for lat, lng in coords) / len(coords)
 
-    # 4단계: 각 후보역과 중심점 사이의 거리를 계산합니다.
+    # 각 후보역과 중심점 사이의 거리를 계산합니다.
     results = []
     for station in load_stations():
         distance = haversine(center_lat, center_lng, station["lat"], station["lng"])
-        results.append({"name": station["name"], "distance_km": round(distance, 2)})
+        results.append({
+            "name": station["name"],
+            "distance_km": round(distance, 2),
+            "lat": station["lat"],  # 역 좌표 (나중에 이동시간을 구할 때 써요)
+            "lng": station["lng"],
+        })
 
     # 거리가 가까운 순서로 정렬한 뒤, 앞에서부터 top_n개만 잘라서 돌려줍니다.
     results.sort(key=lambda r: r["distance_km"])
     return results[:top_n]
+
+
+def get_candidates(start_places, top_n=3):
+    """
+    출발지 이름 리스트를 받아서, 중심점에서 가까운 후보역 top_n개를 돌려줍니다.
+    (출발지 → 좌표 → 가까운 역, 두 함수를 차례로 부르는 지름길 함수예요)
+
+    출발지를 찾을 수 없으면 친절한 메시지를 담은 ValueError를 일으킵니다.
+    """
+    coords = geocode_places(start_places)
+    return pick_nearest_stations(coords, top_n)
 
 
 # 이 파일을 직접 실행할 때만 아래 테스트가 동작합니다.

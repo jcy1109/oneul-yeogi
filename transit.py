@@ -82,6 +82,11 @@ def add_one_usage():
     write_json(USAGE_PATH, {"date": today_kst(), "count": get_today_usage() + 1})
 
 
+def get_remaining_calls():
+    """오늘 ODsay를 몇 번 더 부를 수 있는지 돌려줍니다."""
+    return max(DAILY_LIMIT - get_today_usage(), 0)
+
+
 # ─────────────────────────────────────────────
 # 메모장(캐시)
 # ─────────────────────────────────────────────
@@ -93,6 +98,11 @@ def make_cache_key(start, end):
     예) "37.49809,127.02800->37.37247,126.94347"
     """
     return f"{start[0]:.5f},{start[1]:.5f}->{end[0]:.5f},{end[1]:.5f}"
+
+
+def is_cached(start, end):
+    """이 구간이 메모장에 이미 적혀 있으면 True (= ODsay를 부르지 않아도 됨)"""
+    return make_cache_key(start, end) in read_json(CACHE_PATH, {})
 
 
 # ─────────────────────────────────────────────
