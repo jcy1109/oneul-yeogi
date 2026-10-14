@@ -17,12 +17,16 @@ KAKAO_REST_API_KEY = os.getenv("KAKAO_REST_API_KEY")
 KAKAO_KEYWORD_URL = "https://dapi.kakao.com/v2/local/search/keyword.json"
 
 
-def get_coordinates(place_name):
+def get_coordinates(place_name, category=None):
     """
     장소 이름을 받아서 (위도, 경도)를 돌려주는 함수입니다.
     검색 결과가 없으면 None을 돌려줍니다.
 
+    category: 특정 종류의 장소에서만 찾고 싶을 때 쓰는 카카오 카테고리 코드
+              (예: "SW8" = 지하철역). 비워두면 모든 장소에서 찾습니다.
+
     예) get_coordinates("강남역") → (37.49..., 127.02...)
+        get_coordinates("강남역", category="SW8") → 지하철역 중에서만 검색
     """
     # API 키가 없으면 더 진행할 수 없으므로, 알기 쉬운 에러를 냅니다.
     if not KAKAO_REST_API_KEY:
@@ -33,6 +37,10 @@ def get_coordinates(place_name):
 
     # 무엇을 검색할지 알려주는 정보 (query = 검색어)
     params = {"query": place_name}
+
+    # 카테고리를 지정했다면, 그 종류의 장소에서만 찾도록 조건을 추가합니다.
+    if category:
+        params["category_group_code"] = category
 
     # 카카오 서버에 요청을 보냅니다. 10초 안에 답이 없으면 포기합니다.
     response = requests.get(KAKAO_KEYWORD_URL, headers=headers, params=params, timeout=10)
