@@ -67,22 +67,25 @@ def count_odsay_calls(coords, stations):
     return count
 
 
-def estimate_calls(start_places, top_n=None):
+def estimate_calls(coords, top_n=None):
     """
-    출발지 이름만으로 "ODsay를 몇 번 부를지"와 "후보역 이름"을 미리 알려줍니다.
-    (카카오만 쓰고 ODsay는 부르지 않아요)
+    출발지 좌표만으로 "ODsay를 몇 번 부를지"와 "후보역 이름"을 미리 알려줍니다.
+    (ODsay는 부르지 않아요)
     top_n을 비워두면 친구 수에 맞춰 후보 개수를 정해요.
     """
     if top_n is None:
-        top_n = candidate_count(len(start_places))
-    coords = geocode_places(start_places)
+        top_n = candidate_count(len(coords))
     stations = pick_nearest_stations(coords, top_n)
     return count_odsay_calls(coords, stations), [s["name"] for s in stations]
 
 
-def build_travel_table(start_places, top_n=None):
+def build_travel_table(friends, coords, top_n=None):
     """
     [1단계] 친구 × 후보역마다 소요시간과 환승 횟수를 구해서 "이동시간 표"를 만듭니다.
+
+    friends: 화면에 보여줄 친구별 출발지 이름 (예: ["스타필드시티 위례", "수원역"])
+    coords: 친구별 출발 좌표 (위도, 경도) 리스트. friends와 순서가 같아야 해요.
+            (화면에서 사용자가 직접 고른 위치의 좌표예요)
 
     돌려주는 값 예시:
         {
@@ -99,8 +102,7 @@ def build_travel_table(start_places, top_n=None):
     top_n을 비워두면 친구 수에 맞춰 후보 개수를 정해요. (2명 → 5곳, 3명 → 3곳)
     """
     if top_n is None:
-        top_n = candidate_count(len(start_places))
-    coords = geocode_places(start_places)  # 친구 출발지 → 좌표
+        top_n = candidate_count(len(coords))
     stations = pick_nearest_stations(coords, top_n)  # 후보역 고르기
 
     # 시작하기 전에, 오늘 남은 호출 횟수로 충분한지 확인합니다.
@@ -115,7 +117,7 @@ def build_travel_table(start_places, top_n=None):
             "내일 다시 시도하거나 친구 수를 줄여주세요."
         )
 
-    table = {"friends": list(start_places), "stations": []}
+    table = {"friends": list(friends), "stations": []}
 
     for station in stations:
         station_coord = (station["lat"], station["lng"])
@@ -217,53 +219,90 @@ def describe_route(route):
     return f"{route['time_min']}분(환승 {route['transfers']})"
 
 
+def stop_name(segment, which):
+    """
+    구간의 타는 곳(which="start") 또는 내리는 곳(which="end") 이름을 돌려줍니다.
+    지하철이면 "마천" → "마천역"처럼 "역"을 붙여요. ("서울역"처럼 이미 "역"으로 끝나면 그대로)
+    버스 정류장 이름은 그대로 써요.
+    """
+    name = segment[which]
+    if segment["type"] == "subway" and not name.endswith("역"):
+        return name + "역"
+    return name
+
+
+def first_walk(route):
+    """
+    출발지(집)에서 첫 역(또는 정류장)까지 걷는 구간을 돌려줍니다. 없으면 None.
+    ODsay는 경로의 맨 처음에 "출발지 → 첫 역" 도보 구간을 넣어줘요.
+    """
+    segments = route.get("segments", [])
+    if segments and segments[0]["type"] == "walk":
+        return segments[0]
+    return None
+
+
 def route_summary(route):
     """
-    경로를 한 줄로 요약합니다.
-    예) "강남 → [2호선] → 사당 (환승) → [4호선] → 금정"
+    경로를 한 줄로 요약합니다. 노선 이름이 바뀌는 곳이 갈아타는 곳이에요.
+    예) "🏠 → 도보 7분 → 마천역 [5호선] → 오금역 [3호선] → 교대역"
     """
     if "error" in route:
         return "경로 없음"
     if route.get("walk"):
-        return f"걸어서 {route['time_min']}분"
+        return f"🏠 → 걸어서 {route['time_min']}분"
 
     rides = [s for s in route.get("segments", []) if s["type"] != "walk"]  # 탈것 구간만
     if not rides:
         return "경로 정보 없음"
 
-    text = rides[0]["start"]
+    # 1) 집에서 첫 역까지 걷는 구간 (0분이면 생략)
+    text = "🏠 → "
+    walk = first_walk(route)
+    if walk and walk["minutes"] > 0:
+        text += f"도보 {walk['minutes']}분 → "
+
+    # 2) 타는 곳 [노선] → 타는 곳 [노선] → ... 순서로 이어 붙여요
     for i, ride in enumerate(rides):
         if i > 0:
-            text += " (환승)"
-            # 내린 곳과 다음에 타는 곳이 다르면 (예: 버스 정류장 → 지하철역) 타는 곳도 적어줘요
-            if ride["start"] != rides[i - 1]["end"]:
-                text += f" → {ride['start']}"
-        text += f" → [{ride['line']}] → {ride['end']}"
-    return text
+            # 내린 곳과 다음에 타는 곳이 다르면 (예: 버스 정류장 → 지하철역) 내린 곳도 적어줘요
+            got_off = stop_name(rides[i - 1], "end")
+            if got_off != stop_name(ride, "start"):
+                text += f"{got_off} → "
+        text += f"{stop_name(ride, 'start')} [{ride['line']}] → "
+
+    # 3) 마지막에 내리는 곳
+    return text + stop_name(rides[-1], "end")
 
 
 def route_details(route):
     """
     경로를 구간별 문장 리스트로 바꿉니다. (펼치기 화면에서 한 줄씩 보여줘요)
-    예) ["🚶 도보 1분 (37m)", "🚇 2호선 강남 → 사당 (4개 역, 9분)", ...]
+    예) ["🏠 출발지에서 마천역까지 도보 7분 (480m)", "🚇 5호선 마천역 → 오금역 (3개 역, 6분)", ...]
     """
     if "error" in route:
         return [route["error"]]
     if route.get("walk"):
-        return [f"🚶 출발지에서 역까지 걸어서 {route['time_min']}분"]
+        return [f"🏠 출발지에서 역까지 걸어서 {route['time_min']}분"]
 
+    segments = route.get("segments", [])
+    rides = [s for s in segments if s["type"] != "walk"]  # 탈것 구간만
     lines = []
-    for seg in route.get("segments", []):
+    for i, seg in enumerate(segments):
         if seg["type"] == "walk":
             if seg["minutes"] == 0:  # 0분 도보(같은 역 안 환승 등)는 생략
                 continue
             distance = f" ({seg['distance_m']}m)" if seg["distance_m"] else ""
-            lines.append(f"🚶 도보 {seg['minutes']}분{distance}")
+            if i == 0 and rides:
+                # 맨 처음 도보 = 집에서 첫 역(정류장)까지
+                lines.append(f"🏠 출발지에서 {stop_name(rides[0], 'start')}까지 도보 {seg['minutes']}분{distance}")
+            else:
+                lines.append(f"🚶 도보 {seg['minutes']}분{distance}")
         else:
             icon = "🚇" if seg["type"] == "subway" else "🚌"
             unit = "개 역" if seg["type"] == "subway" else "개 정류장"
             lines.append(
-                f"{icon} {seg['line']} {seg['start']} → {seg['end']} "
+                f"{icon} {seg['line']} {stop_name(seg, 'start')} → {stop_name(seg, 'end')} "
                 f"({seg['stations']}{unit}, {seg['minutes']}분)"
             )
     return lines
@@ -319,17 +358,19 @@ def print_side_by_side(table):
 
 # 이 파일을 직접 실행하면, ODsay 호출 횟수를 먼저 알려주고 허락을 받은 뒤 추천합니다.
 if __name__ == "__main__":
-    places = ["강남역", "수원역"]
+    # 공공장소만 써요. (실제 개인 주소는 코드에 적지 않기!)
+    places = ["스타필드시티 위례", "수원역"]
 
     try:
-        needed, station_names = estimate_calls(places)
+        coords = geocode_places(places)  # 출발지 → 좌표 (검색 결과가 여러 개면 첫 번째)
+        needed, station_names = estimate_calls(coords)
         print(f"👥 출발지: {places}")
         print(f"🚉 후보역: {station_names}")
         print(f"📞 ODsay 호출 예정: {needed}번 (오늘 남은 횟수: {get_remaining_calls()}번)")
 
         answer = input("진행할까요? (y/n): ")
         if answer.strip().lower() == "y":
-            table = build_travel_table(places)
+            table = build_travel_table(places, coords)
             print_side_by_side(table)
             if same_top_station(table):
                 print(f"\n👍 두 기준 모두 같은 역({same_top_station(table)})을 추천해요. 모두에게 좋은 장소예요!")

@@ -13,9 +13,17 @@ SUBWAY_ROUTE = {"time_min": 40, "transfers": 1, "segments": [
     {"type": "subway", "line": "4호선", "start": "사당", "end": "금정", "minutes": 23, "stations": 10},
 ]}
 
-# 가짜 경로: 버스에서 내린 곳(이수역 정류장)과 지하철 타는 곳(이수)이 다른 경우
+# 가짜 경로: 집에서 7분 걸어서 마천역 → 5호선 → 오금역 → 3호선 → 교대역
+HOME_ROUTE = {"time_min": 45, "transfers": 1, "segments": [
+    {"type": "walk", "minutes": 7, "distance_m": 480},
+    {"type": "subway", "line": "5호선", "start": "마천", "end": "오금", "minutes": 6, "stations": 3},
+    {"type": "walk", "minutes": 2, "distance_m": 0},
+    {"type": "subway", "line": "3호선", "start": "오금", "end": "교대", "minutes": 25, "stations": 12},
+]}
+
+# 가짜 경로: 버스에서 내린 곳(사당역 정류장)과 지하철 타는 곳(이수)이 다른 경우
 BUS_ROUTE = {"time_min": 48, "transfers": 1, "segments": [
-    {"type": "bus", "line": "040/N64번", "start": "강남역9번출구", "end": "이수역", "minutes": 16, "stations": 8},
+    {"type": "bus", "line": "040/N64번", "start": "강남역9번출구", "end": "사당역", "minutes": 16, "stations": 8},
     {"type": "walk", "minutes": 4, "distance_m": 250},
     {"type": "subway", "line": "4호선", "start": "이수", "end": "금정", "minutes": 25, "stations": 11},
 ]}
@@ -127,31 +135,38 @@ def test_candidate_count():
         assert friends * candidate_count(friends) <= 10
 
 
+def test_route_summary_home_walk():
+    """경로 요약: 집에서 첫 역까지 걷는 구간부터 보여주고, 지하철역에는 '역'을 붙여요."""
+    assert route_summary(HOME_ROUTE) == "🏠 → 도보 7분 → 마천역 [5호선] → 오금역 [3호선] → 교대역"
+
+
 def test_route_summary_subway():
-    """경로 요약: 같은 역에서 갈아타면 '사당 (환승)'처럼 한 번만 보여줘요."""
-    assert route_summary(SUBWAY_ROUTE) == "강남 → [2호선] → 사당 (환승) → [4호선] → 금정"
+    """경로 요약: 같은 역에서 갈아타면 그 역을 한 번만 보여줘요."""
+    assert route_summary(SUBWAY_ROUTE) == "🏠 → 도보 1분 → 강남역 [2호선] → 사당역 [4호선] → 금정역"
 
 
 def test_route_summary_bus_to_subway():
-    """경로 요약: 내린 곳과 타는 곳이 다르면 타는 곳도 보여줘요."""
-    assert route_summary(BUS_ROUTE) == "강남역9번출구 → [040/N64번] → 이수역 (환승) → 이수 → [4호선] → 금정"
+    """경로 요약: 걷는 구간이 없으면 바로 타는 곳부터, 내린 곳과 타는 곳이 다르면 내린 곳도 보여줘요."""
+    assert route_summary(BUS_ROUTE) == "🏠 → 강남역9번출구 [040/N64번] → 사당역 → 이수역 [4호선] → 금정역"
 
 
 def test_route_details():
-    """자세한 경로: 구간마다 한 줄씩, 0분 도보는 생략해요."""
-    assert route_details(SUBWAY_ROUTE) == [
-        "🚶 도보 1분 (37m)",
-        "🚇 2호선 강남 → 사당 (4개 역, 9분)",
-        "🚇 4호선 사당 → 금정 (10개 역, 23분)",
+    """자세한 경로: 첫 도보는 '출발지에서 ○○역까지', 0분 도보는 생략해요."""
+    assert route_details(HOME_ROUTE) == [
+        "🏠 출발지에서 마천역까지 도보 7분 (480m)",
+        "🚇 5호선 마천역 → 오금역 (3개 역, 6분)",
+        "🚶 도보 2분",
+        "🚇 3호선 오금역 → 교대역 (12개 역, 25분)",
     ]
-    assert route_details(BUS_ROUTE)[0] == "🚌 040/N64번 강남역9번출구 → 이수역 (8개 정류장, 16분)"
+    assert route_details(SUBWAY_ROUTE)[0] == "🏠 출발지에서 강남역까지 도보 1분 (37m)"
+    assert route_details(BUS_ROUTE)[0] == "🚌 040/N64번 강남역9번출구 → 사당역 (8개 정류장, 16분)"
 
 
 def test_route_walk_and_error():
     """걸어가는 경로와 못 구한 경로도 멈추지 않고 문구로 보여줘요."""
     walk = {"time_min": 7, "transfers": 0, "walk": True}
-    assert route_summary(walk) == "걸어서 7분"
-    assert route_details(walk) == ["🚶 출발지에서 역까지 걸어서 7분"]
+    assert route_summary(walk) == "🏠 → 걸어서 7분"
+    assert route_details(walk) == ["🏠 출발지에서 역까지 걸어서 7분"]
     assert route_summary({"error": "경로를 찾을 수 없어요."}) == "경로 없음"
 
 
@@ -170,7 +185,7 @@ if __name__ == "__main__":
     tests = [
         test_fair_longest_first, test_fair_tie_smaller_gap, test_fair_not_both_90,
         test_fast, test_default_is_fair, test_same_top_station, test_excluded_station,
-        test_candidate_count, test_route_summary_subway, test_route_summary_bus_to_subway,
+        test_candidate_count, test_route_summary_home_walk, test_route_summary_subway, test_route_summary_bus_to_subway,
         test_route_details, test_route_walk_and_error, test_unknown_criterion,
     ]
     for test in tests:

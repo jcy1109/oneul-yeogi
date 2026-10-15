@@ -94,6 +94,37 @@ def test_cache():
     assert transit.get_today_usage() == 1  # 기록부에도 1번만 적힘
 
 
+def test_cache_key_rounds_start():
+    """메모장 제목: 출발지는 소수점 3자리(약 100m)로 반올림, 도착지(역)는 5자리 그대로여야 해요."""
+    key = transit.make_cache_key((37.4980123, 127.0279876), END)
+    assert key == "37.498,127.028->37.37247,126.94347"
+    assert "37.4980123" not in key and "37.49801" not in key  # 정확한 출발 위치는 남지 않음
+
+
+def test_same_neighborhood_shares_cache():
+    """약 100m 안의 두 출발지는 메모장 기록을 함께 써요. ODsay에는 처음 출발지의 정확한 좌표를 보내요."""
+    fresh_files()
+    postman = fake_postman(FAKE_OK)
+    home_a = (37.49812, 127.02795)  # 강남역 근처의 두 지점 (약 10m 떨어짐)
+    home_b = (37.49805, 127.02803)
+    far = (37.50100, 127.02800)  # 약 300m 떨어진 곳 → 다른 동네
+
+    with mock.patch("transit.requests.get", postman), mock.patch("transit.ODSAY_API_KEY", "FAKE_KEY"):
+        transit.get_transit_info(home_a, END)
+        transit.get_transit_info(home_b, END)  # 같은 동네 → 메모장에서 꺼냄
+        assert postman.call_count == 1
+        sent = postman.call_args.kwargs["params"]
+        assert (sent["SY"], sent["SX"]) == home_a  # ODsay에는 반올림하지 않은 좌표
+
+        transit.get_transit_info(far, END)  # 다른 동네 → 새로 물어봄
+        assert postman.call_count == 2
+
+    # 메모장 파일 안에도 정확한 좌표는 없어야 해요
+    with open(transit.CACHE_PATH, encoding="utf-8") as f:
+        saved = f.read()
+    assert "37.49812" not in saved and "37.49805" not in saved
+
+
 def test_segments_parsed():
     """구간 정보: 호선 이름에서 "수도권 "을 빼고, 버스는 여러 번호를 함께 보여줘야 해요."""
     result = transit.parse_transit_response(FAKE_OK)
@@ -179,7 +210,7 @@ def test_network_error():
 
 # 이 파일을 직접 실행하면 위의 테스트들을 차례로 실행합니다.
 if __name__ == "__main__":
-    tests = [test_cache, test_segments_parsed, test_old_cache_without_segments, test_wrong_key, test_too_close, test_daily_limit, test_new_day, test_network_error]
+    tests = [test_cache, test_cache_key_rounds_start, test_same_neighborhood_shares_cache, test_segments_parsed, test_old_cache_without_segments, test_wrong_key, test_too_close, test_daily_limit, test_new_day, test_network_error]
     for test in tests:
         test()  # 실패하면 여기서 AssertionError가 나며 멈춰요
         print(f"✅ {test.__name__}: {test.__doc__.strip().splitlines()[0]}")

@@ -6,8 +6,10 @@
 
 import html  # 사용자가 입력한 글자를 HTML에 안전하게 넣기 위한 도구
 
+import requests  # 카카오 서버 연결 오류를 알아보기 위한 도구
 import streamlit as st  # 파이썬 코드를 웹 화면으로 바꿔주는 도구
 
+import geocode  # 출발지 검색(주소 → 키워드 순서) 도구
 from recommend import (
     CRITERIA, DEFAULT_CRITERION, build_travel_table,
     rank_stations, route_details, route_summary, same_top_station,
@@ -17,6 +19,9 @@ from transit import DAILY_LIMIT, get_today_usage
 # 친구는 최소 2명, 최대 3명까지 (ODsay 하루 30건 제한 때문)
 MAX_FRIENDS = 3
 MIN_FRIENDS = 2
+
+# 출발지 입력칸 안내 문구
+PLACE_HINT = "주소, 아파트 이름, 역 이름 모두 가능해요"
 
 # 결과 카드로 크게 보여줄 순위 개수 (나머지는 "다른 후보 보기"에 접어둬요)
 CARD_COUNT = 3
@@ -56,7 +61,7 @@ if "friend_ids" not in st.session_state:
     st.session_state.next_friend_id = MIN_FRIENDS  # 다음에 추가될 친구의 번호표
 if "table" not in st.session_state:
     st.session_state.table = None  # 이동시간 표 (아직 추천 전이라 비어 있음)
-    st.session_state.table_places = []  # 그 표를 만들 때 쓴 출발지들
+    st.session_state.table_places = []  # 그 표를 만들 때 쓴 출발지들 (이름, 위도, 경도)
 
 
 def add_friend():
@@ -71,6 +76,54 @@ def remove_friend(friend_id):
     if len(st.session_state.friend_ids) > MIN_FRIENDS:
         st.session_state.friend_ids.remove(friend_id)
         st.session_state.pop(f"place_{friend_id}", None)  # 지운 칸에 적혀 있던 글자도 정리
+
+
+@st.cache_data(show_spinner=False, max_entries=100)
+def search_places(query):
+    """
+    카카오에서 출발지를 검색합니다. (geocode.search_places를 부르는 얇은 포장지)
+    Streamlit은 화면을 자주 다시 그려서, 같은 검색어를 매번 카카오에 묻지 않도록
+    결과를 "메모리"에만 잠깐 기억해둬요. (파일에는 저장하지 않아서 집 주소가 남지 않아요)
+    """
+    return geocode.search_places(query)
+
+
+def choose_place(text, friend_id):
+    """
+    입력한 출발지를 검색해서 사용자가 위치를 확인(또는 선택)하게 하고,
+    고른 장소 {"name", "address", "lat", "lng"}를 돌려줍니다.
+    빈칸이거나 찾지 못했으면 None을 돌려줘요.
+    """
+    if text == "":
+        return None
+
+    try:
+        results = search_places(text)
+    except (requests.RequestException, ValueError) as error:
+        # 인터넷 문제, 카카오 키 문제 등 → 멈추지 않고 안내만
+        st.error(f"'{text}' 검색 중 문제가 생겼어요: {error}")
+        return None
+
+    if not results:
+        st.warning(f"'{text}'을(를) 찾을 수 없어요. 주소나 이름을 다시 확인해주세요.")
+        return None
+
+    if len(results) == 1:
+        chosen = results[0]
+    else:
+        # 결과가 여러 개면 상위 3개 중에서 고르게 해요.
+        # 입력칸 이름에 검색어도 넣어서, 검색어를 바꾸면 선택이 처음(1번)으로 돌아가요.
+        index = st.radio(
+            "어느 곳인가요?",
+            options=range(len(results)),
+            format_func=lambda i: geocode.place_text(results[i]),  # 예: "롯데월드 (서울 송파구 ...)"
+            key=f"pick_{friend_id}_{text}",
+        )
+        chosen = results[index]
+
+    # 고른 위치를 "📍 이름 (주소)"로 보여줘서 맞는 곳인지 확인할 수 있게 해요.
+    st.markdown(geocode.place_label(chosen))
+    return chosen
 
 
 def travel_bars_html(friends, routes, scale_max):
@@ -134,7 +187,8 @@ st.write("친구들 모두에게 공정한 약속 장소 찾기")
 st.subheader("👥 친구들의 출발지")
 
 can_remove = len(st.session_state.friend_ids) > MIN_FRIENDS
-places = []  # 입력된 출발지들을 모을 리스트
+texts = []  # 입력칸에 적은 글자들
+chosen_places = []  # 검색해서 고른 장소들 (못 찾았으면 None)
 
 for position, friend_id in enumerate(st.session_state.friend_ids):
     label = f"친구 {position + 1} 출발지"
@@ -144,14 +198,21 @@ for position, friend_id in enumerate(st.session_state.friend_ids):
         # 입력칸(넓게)과 ✕ 버튼(좁게)을 한 줄에 나란히 놓아요
         input_col, button_col = st.columns([6, 1], vertical_alignment="bottom")
         with input_col:
-            text = st.text_input(label, key=key, placeholder="예: 강남역, 홍익대학교")
+            text = st.text_input(label, key=key, placeholder=PLACE_HINT)
         with button_col:
             st.button("✕", key=f"remove_{friend_id}", on_click=remove_friend, args=(friend_id,),
                       help="이 친구 삭제")
     else:
-        text = st.text_input(label, key=key, placeholder="예: 강남역, 홍익대학교")
+        text = st.text_input(label, key=key, placeholder=PLACE_HINT)
 
-    places.append(text.strip())  # 앞뒤 공백은 지워요
+    text = text.strip()  # 앞뒤 공백은 지워요
+    texts.append(text)
+    chosen_places.append(choose_place(text, friend_id))
+
+# 결과 화면에 보여줄 친구별 출발지 이름과, 이동시간 계산에 쓸 좌표
+# (출발지가 바뀌었는지 확인할 때도 이 목록을 비교해요. 빈칸·못 찾은 칸은 None으로 남겨서
+#  친구를 추가해 빈칸이 생겨도 "바뀌었다"고 알아챌 수 있게 해요)
+places = [(p["name"], p["lat"], p["lng"]) if p else None for p in chosen_places]
 
 st.button(
     "+ 친구 추가",
@@ -179,16 +240,22 @@ criterion = st.radio(
 problem_shown = False  # 이번에 안내(경고/오류)를 보여줬는지
 
 if st.button("약속 장소 추천받기", type="primary"):
-    if any(place == "" for place in places):
+    if any(text == "" for text in texts):
         # 빈 칸이 있을 때
         st.warning("비어 있는 출발지 칸이 있어요. 모든 친구의 출발지를 입력해주세요.")
+        problem_shown = True
+    elif any(place is None for place in chosen_places):
+        # 찾지 못한 출발지가 있을 때 (입력칸 아래에 이미 어떤 칸인지 안내했어요)
+        st.warning("찾지 못한 출발지가 있어요. 입력칸 아래 안내를 확인해주세요.")
         problem_shown = True
     else:
         try:
             # ODsay를 부를 수 있는 곳은 여기 한 군데뿐이에요. (버튼을 눌렀을 때만)
             # 후보역 개수는 친구 수에 맞춰 자동으로 정해져요. (2명 → 5곳, 3명 → 3곳)
             with st.spinner("이동시간 계산 중..."):
-                table = build_travel_table(places)
+                names = [name for name, lat, lng in places]
+                coords = [(lat, lng) for name, lat, lng in places]
+                table = build_travel_table(names, coords)
             st.session_state.table = table  # 사물함에 이동시간 표 저장
             st.session_state.table_places = places  # 어떤 출발지로 만든 표인지도 저장
         except ValueError as error:
@@ -204,7 +271,7 @@ table = st.session_state.table
 
 if table is not None:
     if st.session_state.table_places != places:
-        # 추천받은 뒤 출발지를 고쳤다면(친구 추가·삭제 포함), 옛날 결과는 숨기고 안내합니다.
+        # 추천받은 뒤 출발지를 고쳤다면(친구 추가·삭제, 다른 위치 선택 포함), 옛날 결과는 숨기고 안내합니다.
         if not problem_shown:
             st.info("출발지가 바뀌었어요. '약속 장소 추천받기'를 다시 눌러주세요.")
     else:

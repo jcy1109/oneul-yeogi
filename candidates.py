@@ -5,7 +5,7 @@ import json  # JSON 파일을 읽기 위한 도구
 import math  # 삼각함수(sin, cos 등)와 제곱근 같은 수학 계산 도구
 import os  # 파일 경로를 다루기 위한 도구
 
-from geocode import get_coordinates  # 우리가 만든 "이름 → 좌표" 함수
+from geocode import search_places  # 우리가 만든 "주소·장소 이름 → 좌표" 함수
 
 # 후보역 좌표가 저장된 파일 위치
 STATIONS_PATH = os.path.join("data", "stations.json")
@@ -42,7 +42,9 @@ def load_stations():
 
 def geocode_places(start_places):
     """
-    출발지 이름 리스트를 좌표 리스트로 바꿉니다. (순서는 입력과 같아요)
+    출발지 이름(주소, 장소 이름) 리스트를 좌표 리스트로 바꿉니다. (순서는 입력과 같아요)
+    검색 결과가 여러 개면 첫 번째 결과를 써요. (화면에서는 사용자가 직접 고르지만,
+    recommend.py를 직접 실행할 때처럼 고를 수 없는 곳에서는 첫 번째를 써요)
     찾을 수 없는 곳이 있으면 전부 모아서 친절한 메시지를 담은 ValueError를 일으킵니다.
     """
     # 출발지가 하나도 없으면 계산할 수 없으므로 알려줍니다.
@@ -53,11 +55,11 @@ def geocode_places(start_places):
     not_found = []  # 못 찾은 출발지 이름을 담을 리스트
 
     for place in start_places:
-        result = get_coordinates(place)
-        if result is None:
+        results = search_places(place)
+        if not results:
             not_found.append(place)
         else:
-            coords.append(result)
+            coords.append((results[0]["lat"], results[0]["lng"]))
 
     # 못 찾은 곳이 있으면, 전부 모아서 한 번에 친절하게 알려줍니다.
     if not_found:

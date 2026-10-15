@@ -2,21 +2,46 @@
 # 역할: app.py 화면을 "로봇"이 대신 눌러보는 자동 테스트입니다.
 #       (Streamlit의 AppTest: 브라우저 없이 입력 → 버튼 클릭 → 화면 내용 확인)
 #
-# ⚠️ 이 테스트는 ODsay를 절대 부르지 않아요.
-#    - ODsay 주소로 가는 요청은 "부르면 즉시 테스트 실패"로 막아두었어요.
+# ⚠️ 이 테스트는 인터넷을 전혀 쓰지 않아요. (ODsay 0번, 카카오 0번)
+#    - 출발지 검색(카카오)은 "가짜 검색 결과(FAKE_PLACES)"로 바꿔치기해요.
+#    - 인터넷으로 나가는 요청은 "부르면 즉시 테스트 실패"로 막아두었어요.
 #    - 추천 결과 화면은 "가짜 이동시간 표"로 확인해요. (내 컴퓨터의 캐시에 기대지 않아서 어디서나 똑같이 동작)
-#    카카오(장소 → 좌표)는 "없는 장소"·"한도 초과" 테스트에서만 실제로 부릅니다.
+#    가짜 검색 결과에는 공공장소만 써요. (실제 개인 주소는 절대 적지 않기!)
 
 import os  # 파일 경로를 다루기 위한 도구
 import tempfile  # 테스트용 임시 폴더를 만들기 위한 도구
 from unittest import mock  # 진짜 함수를 가짜로 바꿔치기하는 도구
 
-import requests  # 진짜 우체부 (카카오 호출에는 그대로 써요)
+import streamlit as st  # 검색 결과 기억(cache)을 비우기 위한 도구
 from streamlit.testing.v1 import AppTest  # Streamlit 화면 자동 테스트 도구
 
 import transit
 
-real_get = requests.get  # 바꿔치기하기 전에 진짜 우체부를 따로 챙겨둡니다.
+
+def place(name, address, lat, lng):
+    """가짜 검색 결과 하나를 만들어줍니다. (geocode.search_places가 돌려주는 모양과 같아요)"""
+    return {"name": name, "address": address, "lat": lat, "lng": lng}
+
+
+# 가짜 검색 결과: 검색어 → 결과 목록 (여기에 없는 검색어는 "못 찾음")
+LOTTE_WORLD = [
+    place("롯데월드 어드벤처", "서울 송파구 올림픽로 240", 37.511, 127.098),
+    place("롯데월드몰", "서울 송파구 올림픽로 300", 37.513, 127.104),
+    place("롯데월드 민속박물관", "서울 송파구 올림픽로 240", 37.512, 127.097),
+]
+FAKE_PLACES = {
+    "강남역": [place("강남역", "서울 강남구 강남대로 396", 37.49809, 127.02800)],
+    "수원역": [place("수원역", "경기 수원시 팔달구 덕영대로 924", 37.26579, 127.00009)],
+    "홍대입구역": [place("홍대입구역", "서울 마포구 양화로 160", 37.55720, 126.92450)],
+    "잠실역": [place("잠실역", "서울 송파구 올림픽로 265", 37.51330, 127.10010)],
+    "롯데월드": LOTTE_WORLD,
+    "<b>해킹</b>": [place("<b>해킹</b>", "", 37.5, 127.0)],
+}
+
+
+def fake_search(query):
+    """가짜 출발지 검색: FAKE_PLACES에서 찾아서 돌려줘요. 없으면 빈 리스트(못 찾음)"""
+    return FAKE_PLACES.get(query, [])
 
 # 가짜 이동시간 표: 강남역 + 수원역 → 후보 5곳
 # (fair는 금정이 1위, fast로 바꾸면 사당이 1위가 되도록 만든 숫자예요)
@@ -47,19 +72,22 @@ FAKE_TABLE = {
 }
 
 
-def odsay_forbidden(url, *args, **kwargs):
-    """
-    주소가 ODsay면 바로 테스트를 실패시키고, 그 밖의 주소(카카오)는 진짜 우체부에게 넘기는 '가짜 우체부'
-    (requests는 카카오와 ODsay가 함께 쓰는 도구라서, ODsay만 골라서 막아야 해요)
-    """
-    if "odsay.com" in url:
-        raise AssertionError("테스트 중에 ODsay를 부르려고 했어요!")
-    return real_get(url, *args, **kwargs)
+def internet_forbidden(url, *args, **kwargs):
+    """어디로든 인터넷 요청을 보내려고 하면 바로 테스트를 실패시키는 '가짜 우체부'"""
+    raise AssertionError(f"테스트 중에 인터넷({url})을 부르려고 했어요!")
 
 
 def open_app():
     """app.py를 열고 첫 화면을 그립니다."""
+    st.cache_data.clear()  # 앞 테스트의 검색 결과 기억을 지우고 새로 시작
     at = AppTest.from_file("app.py", default_timeout=30)
+    return at.run()
+
+
+def type_places(at, names):
+    """입력칸에 출발지들을 차례로 적고 화면을 다시 그립니다."""
+    for box, name in zip(at.text_input, names):
+        box.input(name)
     return at.run()
 
 
@@ -94,8 +122,9 @@ def test_first_screen():
     assert "친구들 모두에게 공정한 약속 장소 찾기" in text
     assert len(at.text_input) == 2
     assert len(remove_buttons(at)) == 0  # 2명일 땐 ✕ 숨김
-    assert at.radio[0].value == "fair"
-    assert at.radio[0].options == ["⚖️ 공평하게", "⚡ 빠르게"]  # 기준은 2개
+    assert at.text_input[0].placeholder == "주소, 아파트 이름, 역 이름 모두 가능해요"
+    assert at.radio(key="criterion").value == "fair"
+    assert at.radio(key="criterion").options == ["⚖️ 공평하게", "⚡ 빠르게"]  # 기준은 2개
     assert f"오늘 ODsay 사용량: {transit.get_today_usage()}/30건" in text
 
 
@@ -151,18 +180,20 @@ def test_result_cards_and_switch_criterion():
     """결과 카드(경로 요약 + 자세히 보기) → 기준을 바꿔도 이동시간 표를 다시 만들지 않아야 해요."""
     fake_build = mock.Mock(return_value=FAKE_TABLE)
     with mock.patch("recommend.build_travel_table", fake_build):
-        at = open_app()
-        at.text_input[0].input("강남역")
-        at.text_input[1].input("수원역")
+        at = type_places(open_app(), ["강남역", "수원역"])
+        assert "📍 강남역 (서울 강남구 강남대로 396)" in all_text(at)  # 위치 확인 문구
         at = click(at, "약속 장소 추천받기")
         assert not at.exception, at.exception
+
+        # 이동시간 표는 "고른 위치의 이름"과 "좌표"로 만들어요
+        assert fake_build.call_args.args == (["강남역", "수원역"], [(37.49809, 127.028), (37.26579, 127.00009)])
 
         text = all_text(at)
         assert "🏆 1위 · 금정역" in text  # fair 기준 1위
         assert "40분 · 환승 1" in text  # 막대 옆 글자
-        assert "**강남역** · 강남 → [2호선]" in text  # 친구별 경로 요약
-        assert "강남 → [2호선] → 사당 (환승) → [4호선] → 금정" in text  # 카드의 경로 요약
-        assert "🚇 2호선 강남 → 사당 (4개 역, 9분)" in text  # 펼치기 안의 자세한 경로
+        assert "**강남역** · 🏠 → 도보 1분 → 강남역 [2호선] → 사당역 [4호선] → 금정역" in text  # 경로 요약
+        assert "🏠 출발지에서 강남역까지 도보 1분 (37m)" in text  # 펼치기 안: 집에서 첫 역까지
+        assert "🚇 2호선 강남역 → 사당역 (4개 역, 9분)" in text  # 펼치기 안의 자세한 경로
         assert at.expander[0].label == "자세한 경로 보기"
 
         # 카드는 3위까지만, 4~5위는 스위치를 켜야 보여요
@@ -171,7 +202,7 @@ def test_result_cards_and_switch_criterion():
         assert "#### 4위 · " in all_text(at)
 
         # 기준을 fast로 바꾸면 사당이 1위, 그리고 이동시간 표는 다시 만들지 않음
-        at = at.radio[0].set_value("fast").run()
+        at = at.radio(key="criterion").set_value("fast").run()
         assert not at.exception, at.exception
         text = all_text(at)
         assert "🏆 1위 · 사당역" in text
@@ -188,9 +219,7 @@ def test_result_cards_and_switch_criterion():
 def show_result(table, names=("강남역", "수원역")):
     """가짜 이동시간 표로 추천 결과 화면을 띄워줍니다."""
     with mock.patch("recommend.build_travel_table", mock.Mock(return_value=table)):
-        at = open_app()
-        for box, name in zip(at.text_input, names):
-            box.input(name)
+        at = type_places(open_app(), names)
         return click(at, "약속 장소 추천받기")
 
 
@@ -238,14 +267,45 @@ def test_friend_name_is_escaped():
     assert "<b>해킹</b>" not in bars
 
 
+def test_choose_among_results():
+    """검색 결과가 여러 개면 상위 3개 중에서 고르고, 고른 위치로 이동시간을 계산해야 해요."""
+    fake_build = mock.Mock(return_value=FAKE_TABLE)
+    with mock.patch("recommend.build_travel_table", fake_build):
+        at = type_places(open_app(), ["롯데월드", "수원역"])
+        pick = at.radio(key="pick_0_롯데월드")
+        assert pick.label == "어느 곳인가요?"
+        assert pick.options == [
+            "롯데월드 어드벤처 (서울 송파구 올림픽로 240)",
+            "롯데월드몰 (서울 송파구 올림픽로 300)",
+            "롯데월드 민속박물관 (서울 송파구 올림픽로 240)",
+        ]
+        assert "📍 롯데월드 어드벤처 (서울 송파구 올림픽로 240)" in all_text(at)  # 처음엔 1번이 선택됨
+
+        # 두 번째 결과를 고르면 확인 문구도 바뀌어요
+        at = pick.set_value(1).run()
+        assert "📍 롯데월드몰 (서울 송파구 올림픽로 300)" in all_text(at)
+
+        at = click(at, "약속 장소 추천받기")
+        assert not at.exception, at.exception
+        names, coords = fake_build.call_args.args
+        assert names == ["롯데월드몰", "수원역"]
+        assert coords[0] == (37.513, 127.104)  # 고른 곳의 좌표
+
+        # 결과를 본 뒤 다른 위치를 고르면, 옛 결과는 숨기고 안내해요
+        at = at.radio(key="pick_0_롯데월드").set_value(2).run()
+        text = all_text(at)
+        assert "출발지가 바뀌었어요" in text
+        assert "🏆" not in text
+
+
 def test_place_not_found():
-    """없는 장소를 넣으면 친절하게 안내해야 해요. (카카오만 부르고 ODsay는 안 불러요)"""
-    at = open_app()
-    at.text_input[0].input("강남역")
-    at.text_input[1].input("ㅁㄴㅇㄹ존재하지않는곳")
+    """없는 장소를 넣으면 입력칸 아래에서 바로 안내하고, 추천 버튼을 눌러도 멈추지 않아야 해요."""
+    at = type_places(open_app(), ["강남역", "ㅁㄴㅇㄹ존재하지않는곳"])
+    assert "'ㅁㄴㅇㄹ존재하지않는곳'을(를) 찾을 수 없어요" in all_text(at)
+
     at = click(at, "약속 장소 추천받기")
     assert not at.exception, at.exception
-    assert "'ㅁㄴㅇㄹ존재하지않는곳'을(를) 찾을 수 없어요" in all_text(at)
+    assert "찾지 못한 출발지가 있어요" in all_text(at)
 
 
 def test_daily_limit_reached():
@@ -256,9 +316,7 @@ def test_daily_limit_reached():
     transit.write_json(fake_usage, {"date": transit.today_kst(), "count": 30})
 
     with mock.patch("transit.USAGE_PATH", fake_usage), mock.patch("transit.CACHE_PATH", fake_cache):
-        at = open_app()
-        at.text_input[0].input("홍대입구역")
-        at.text_input[1].input("잠실역")
+        at = type_places(open_app(), ["홍대입구역", "잠실역"])
         at = click(at, "약속 장소 추천받기")
         text = all_text(at)
 
@@ -274,14 +332,14 @@ if __name__ == "__main__":
     tests = [
         test_first_screen, test_add_friend_max_3, test_remove_middle_friend, test_remove_then_add,
         test_empty_input, test_result_cards_and_switch_criterion, test_travel_bars, test_same_winner_message,
-        test_friend_name_is_escaped, test_place_not_found, test_daily_limit_reached,
+        test_friend_name_is_escaped, test_choose_among_results, test_place_not_found, test_daily_limit_reached,
     ]
-    # 모든 테스트 동안 ODsay 우체부를 막아둡니다.
-    with mock.patch("transit.requests.get", odsay_forbidden):
+    # 모든 테스트 동안 출발지 검색은 가짜로 바꾸고, 인터넷 요청(카카오·ODsay)은 막아둡니다.
+    with mock.patch("geocode.search_places", fake_search), mock.patch("requests.get", internet_forbidden):
         for test in tests:
             test()  # 실패하면 여기서 AssertionError가 나며 멈춰요
             print(f"✅ {test.__name__}: {test.__doc__.strip().splitlines()[0]}")
 
     usage_after = transit.get_today_usage()
     assert usage_after == usage_before, "ODsay 사용량이 바뀌었어요!"
-    print(f"\n🎉 테스트 {len(tests)}개 모두 통과! (ODsay 실제 호출 0번, 사용량 {usage_after}/30건 그대로)")
+    print(f"\n🎉 테스트 {len(tests)}개 모두 통과! (카카오·ODsay 실제 호출 0번, 사용량 {usage_after}/30건 그대로)")
