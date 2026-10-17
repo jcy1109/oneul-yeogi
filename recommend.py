@@ -7,6 +7,7 @@
 # 그래서 기준을 바꿔도 ODsay를 다시 부르지 않아요.
 
 import math  # 올림(ceil) 계산을 위한 도구
+from datetime import date, datetime, timedelta  # 출발 시각(약속 시각 - 이동시간)을 계산하기 위한 도구
 
 from candidates import geocode_places, haversine, pick_nearest_stations
 from transit import DAILY_LIMIT, NoRouteError, get_remaining_calls, get_transit_info, is_cached
@@ -24,6 +25,18 @@ DEFAULT_CRITERION = "fair"
 # (ODsay도 700m 이내는 "너무 가깝다"며 경로를 주지 않아요)
 WALK_LIMIT_KM = 0.7
 WALK_SPEED_KMH = 4  # 보통 걷는 속도 (시속 4km)
+
+# 약속 날짜 종류: 코드에서 쓰는 이름 → 사용자에게 보여줄 이름
+# (다음 단계의 막차 시간표에서 날짜 종류마다 다른 시간표를 쓸 거예요)
+DAY_TYPES = {
+    "weekday": "평일",
+    "saturday": "토요일",
+    "holiday": "일요일·공휴일",
+}
+DEFAULT_DAY_TYPE = "weekday"
+
+# 출발 시각을 계산할 때 더하는 여유 시간(분). 지하철을 한 대 놓쳐도 늦지 않게!
+BUFFER_MIN = 5
 
 # 한 번 검색할 때 ODsay를 최대 몇 번까지 부를지 (하루 30건 제한 때문)
 MAX_CALLS_PER_SEARCH = 10
@@ -209,6 +222,40 @@ def same_top_station(table):
             return None
         winners.add(ranked[0]["name"])
     return winners.pop() if len(winners) == 1 else None
+
+
+# ─────────────────────────────────────────────
+# 출발 시각 계산 (이미 구한 이동시간을 써요 → ODsay를 부르지 않아요)
+# ─────────────────────────────────────────────
+
+def departure_time(meeting_time, travel_min, buffer_min=BUFFER_MIN):
+    """
+    출발 시각 = 약속 시각 - 이동시간 - 여유 시간
+
+    meeting_time: 약속 시각 (datetime.time, 예: 19:00)
+    travel_min: 이동시간(분)
+    돌려주는 값: (출발 시각(time), 전날 출발인지 True/False)
+
+    예) departure_time(19:00, 39) → (18:16, False)
+        departure_time(00:30, 50) → (23:35, True)  ← 자정을 넘으면 "전날"
+    """
+    # 시각(time)끼리는 바로 뺄 수 없어서, 아무 날짜(2000년 1월 2일)에 붙여서 "날짜+시각"으로 만든 뒤 빼요.
+    meeting_day = date(2000, 1, 2)
+    meeting = datetime.combine(meeting_day, meeting_time)
+    leave = meeting - timedelta(minutes=travel_min + buffer_min)
+    return leave.time(), leave.date() < meeting_day
+
+
+def departure_text(meeting_time, route):
+    """
+    한 친구의 출발 시각을 "18:16 출발" 같은 글자로 바꿉니다. (자정을 넘으면 "전날 23:35 출발")
+    경로를 못 구한 친구는 "경로 없음"이에요.
+    """
+    if "error" in route:
+        return "경로 없음"
+    leave, previous_day = departure_time(meeting_time, route["time_min"])
+    text = f"{leave:%H:%M} 출발"
+    return f"전날 {text}" if previous_day else text
 
 
 # ─────────────────────────────────────────────

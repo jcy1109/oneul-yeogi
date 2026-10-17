@@ -3,7 +3,11 @@
 #
 # ⚠️ 순위 함수는 ODsay를 부르지 않아요. 여기서는 가짜 표만 쓰기 때문에 호출 0번이에요.
 
-from recommend import candidate_count, rank_stations, route_details, route_summary, same_top_station
+from datetime import time  # 약속 시각(예: 19:00)을 만들기 위한 도구
+
+from recommend import (
+    candidate_count, departure_text, departure_time, rank_stations, route_details, route_summary, same_top_station,
+)
 
 # 가짜 경로: 강남 → [2호선] → 사당 → [4호선] → 금정 (같은 역에서 환승)
 SUBWAY_ROUTE = {"time_min": 40, "transfers": 1, "segments": [
@@ -170,6 +174,27 @@ def test_route_walk_and_error():
     assert route_summary({"error": "경로를 찾을 수 없어요."}) == "경로 없음"
 
 
+def test_departure_time():
+    """출발 시각 = 약속 시각 - 이동시간 - 여유 5분"""
+    assert departure_time(time(19, 0), 39) == (time(18, 16), False)  # 19:00 - 39분 - 5분
+    assert departure_time(time(19, 0), 0) == (time(18, 55), False)  # 이동시간 0분이어도 여유 5분
+    assert departure_time(time(19, 0), 39, buffer_min=0) == (time(18, 21), False)  # 여유 시간 바꾸기
+
+
+def test_departure_text():
+    """출발 시각 글자: 지하철·도보 경로 모두 "18:16 출발", 경로가 없으면 "경로 없음"이에요."""
+    assert departure_text(time(19, 0), HOME_ROUTE) == "18:10 출발"  # 45분 + 5분
+    assert departure_text(time(19, 0), {"time_min": 7, "transfers": 0, "walk": True}) == "18:48 출발"
+    assert departure_text(time(19, 0), {"error": "경로를 찾을 수 없어요."}) == "경로 없음"
+
+
+def test_departure_previous_day():
+    """자정을 넘으면 "전날"이라고 알려줘야 해요."""
+    assert departure_time(time(0, 30), 50) == (time(23, 35), True)
+    assert departure_text(time(0, 30), {"time_min": 50, "transfers": 0}) == "전날 23:35 출발"
+    assert departure_text(time(0, 30), {"time_min": 25, "transfers": 0}) == "00:00 출발"  # 딱 자정은 같은 날
+
+
 def test_unknown_criterion():
     """없는 기준을 넣으면 친절한 안내가 나와야 해요."""
     table = make_table({"정상역": [40, 50]})
@@ -186,7 +211,8 @@ if __name__ == "__main__":
         test_fair_longest_first, test_fair_tie_smaller_gap, test_fair_not_both_90,
         test_fast, test_default_is_fair, test_same_top_station, test_excluded_station,
         test_candidate_count, test_route_summary_home_walk, test_route_summary_subway, test_route_summary_bus_to_subway,
-        test_route_details, test_route_walk_and_error, test_unknown_criterion,
+        test_route_details, test_route_walk_and_error, test_departure_time, test_departure_text,
+        test_departure_previous_day, test_unknown_criterion,
     ]
     for test in tests:
         test()  # 실패하면 여기서 AssertionError가 나며 멈춰요
