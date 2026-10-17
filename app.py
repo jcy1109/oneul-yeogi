@@ -10,6 +10,7 @@ import requests  # 카카오 서버 연결 오류를 알아보기 위한 도구
 import streamlit as st  # 파이썬 코드를 웹 화면으로 바꿔주는 도구
 
 import geocode  # 출발지 검색(주소 → 키워드 순서) 도구
+import places  # 역 주변 맛집·놀거리 검색 도구
 from recommend import (
     CRITERIA, DEFAULT_CRITERION, build_travel_table,
     rank_stations, route_details, route_summary, same_top_station,
@@ -22,6 +23,9 @@ MIN_FRIENDS = 2
 
 # 출발지 입력칸 안내 문구
 PLACE_HINT = "주소, 아파트 이름, 역 이름 모두 가능해요"
+
+# 주변 장소 정렬 기준 안내 (카카오는 별점·리뷰를 주지 않아서 이 기준으로 정렬해요)
+SORT_NOTE = "정렬: 카카오 검색 정확도/거리 기준"
 
 # 결과 카드로 크게 보여줄 순위 개수 (나머지는 "다른 후보 보기"에 접어둬요)
 CARD_COUNT = 3
@@ -86,6 +90,54 @@ def search_places(query):
     결과를 "메모리"에만 잠깐 기억해둬요. (파일에는 저장하지 않아서 집 주소가 남지 않아요)
     """
     return geocode.search_places(query)
+
+
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=200)
+def nearby_places(station_coord, kind, station_name):
+    """
+    역 주변 장소를 카카오에서 찾습니다. (places.get_nearby_places를 부르는 얇은 포장지)
+    화면을 다시 그릴 때마다 카카오를 부르지 않도록, 결과를 메모리에 1시간 동안 기억해요.
+    """
+    return places.get_nearby_places(station_coord, kind, station_name)
+
+
+@st.cache_data(show_spinner=False, max_entries=100)
+def find_station(name):
+    """역 이름으로 지하철역을 찾습니다. (places.find_station의 얇은 포장지, 결과는 메모리에만 기억)"""
+    return places.find_station(name)
+
+
+def show_nearby_places(station_name, station_coord, key):
+    """
+    역 주변 장소를 🍜 음식점 / ☕ 카페 / 🎬 문화시설 / 🎡 관광명소 탭으로 보여줍니다.
+    추천 결과(1위 역)와 "이미 장소를 정했어요" 탭, 두 군데서 함께 써요.
+    key: 두 군데의 탭을 구분하기 위한 이름표
+    """
+    station_label = places.make_search_word(station_name)  # "사당" → "사당역"
+    st.markdown(f"#### 🗺️ {station_label} 주변 맛집과 놀거리")
+    st.caption(f"{SORT_NOTE} · 역에서 {places.RADIUS_M}m 안, 종류별 최대 {places.MAX_PLACES}곳")
+
+    kinds = list(places.KINDS)
+    tabs = st.tabs([places.KINDS[kind]["label"] for kind in kinds])
+    for tab, kind in zip(tabs, kinds):
+        with tab:
+            try:
+                found = nearby_places(station_coord, kind, station_name)
+            except (requests.RequestException, ValueError) as error:
+                st.error(f"주변 장소를 불러오지 못했어요: {error}")
+                continue
+
+            if not found:
+                st.info("주변에 찾은 곳이 없어요")
+                continue
+
+            # 한 줄에 한 곳씩: 이름(카카오맵 링크) · 세부 카테고리 · 역에서 거리
+            lines = []
+            for p in found:
+                name = p["name"].replace("[", "(").replace("]", ")")  # 링크 모양이 깨지지 않게
+                title = f"[{name}]({p['url']})" if p["url"] else name
+                lines.append(f"- **{title}** · {p['category']} · {p['distance_m']}m")
+            st.markdown("\n".join(lines))
 
 
 def choose_place(text, friend_id):
@@ -181,130 +233,160 @@ st.markdown(BAR_STYLE, unsafe_allow_html=True)  # 막대 그래프 모양 넣기
 st.title("🚇 오늘은여기서")
 st.write("친구들 모두에게 공정한 약속 장소 찾기")
 
-# ─────────────────────────────────────────────
-# 2. 친구 출발지 입력칸 (✕ 버튼은 3명일 때만 보여요)
-# ─────────────────────────────────────────────
-st.subheader("👥 친구들의 출발지")
+# 화면을 탭 두 개로 나눠요. (공책의 색인 탭처럼, 누르면 그 페이지가 보여요)
+#   - 🔎 약속 장소 추천받기: 친구들의 출발지로 공정한 역 추천
+#   - 📍 이미 장소를 정했어요: 역 이름만 넣으면 바로 주변 맛집·놀거리
+recommend_tab, decided_tab = st.tabs(["🔎 약속 장소 추천받기", "📍 이미 장소를 정했어요"])
 
-can_remove = len(st.session_state.friend_ids) > MIN_FRIENDS
-texts = []  # 입력칸에 적은 글자들
-chosen_places = []  # 검색해서 고른 장소들 (못 찾았으면 None)
+with recommend_tab:
+    # ─────────────────────────────────────────────
+    # 2. 친구 출발지 입력칸 (✕ 버튼은 3명일 때만 보여요)
+    # ─────────────────────────────────────────────
+    st.subheader("👥 친구들의 출발지")
 
-for position, friend_id in enumerate(st.session_state.friend_ids):
-    label = f"친구 {position + 1} 출발지"
-    key = f"place_{friend_id}"  # 번호표로 만든 입력칸 이름
+    can_remove = len(st.session_state.friend_ids) > MIN_FRIENDS
+    texts = []  # 입력칸에 적은 글자들
+    chosen_places = []  # 검색해서 고른 장소들 (못 찾았으면 None)
 
-    if can_remove:
-        # 입력칸(넓게)과 ✕ 버튼(좁게)을 한 줄에 나란히 놓아요
-        input_col, button_col = st.columns([6, 1], vertical_alignment="bottom")
-        with input_col:
+    for position, friend_id in enumerate(st.session_state.friend_ids):
+        label = f"친구 {position + 1} 출발지"
+        key = f"place_{friend_id}"  # 번호표로 만든 입력칸 이름
+
+        if can_remove:
+            # 입력칸(넓게)과 ✕ 버튼(좁게)을 한 줄에 나란히 놓아요
+            input_col, button_col = st.columns([6, 1], vertical_alignment="bottom")
+            with input_col:
+                text = st.text_input(label, key=key, placeholder=PLACE_HINT)
+            with button_col:
+                st.button("✕", key=f"remove_{friend_id}", on_click=remove_friend, args=(friend_id,),
+                          help="이 친구 삭제")
+        else:
             text = st.text_input(label, key=key, placeholder=PLACE_HINT)
-        with button_col:
-            st.button("✕", key=f"remove_{friend_id}", on_click=remove_friend, args=(friend_id,),
-                      help="이 친구 삭제")
-    else:
-        text = st.text_input(label, key=key, placeholder=PLACE_HINT)
 
-    text = text.strip()  # 앞뒤 공백은 지워요
-    texts.append(text)
-    chosen_places.append(choose_place(text, friend_id))
+        text = text.strip()  # 앞뒤 공백은 지워요
+        texts.append(text)
+        chosen_places.append(choose_place(text, friend_id))
 
-# 결과 화면에 보여줄 친구별 출발지 이름과, 이동시간 계산에 쓸 좌표
-# (출발지가 바뀌었는지 확인할 때도 이 목록을 비교해요. 빈칸·못 찾은 칸은 None으로 남겨서
-#  친구를 추가해 빈칸이 생겨도 "바뀌었다"고 알아챌 수 있게 해요)
-places = [(p["name"], p["lat"], p["lng"]) if p else None for p in chosen_places]
+    # 결과 화면에 보여줄 친구별 출발지 이름과, 이동시간 계산에 쓸 좌표
+    # (출발지가 바뀌었는지 확인할 때도 이 목록을 비교해요. 빈칸·못 찾은 칸은 None으로 남겨서
+    #  친구를 추가해 빈칸이 생겨도 "바뀌었다"고 알아챌 수 있게 해요)
+    start_places = [(p["name"], p["lat"], p["lng"]) if p else None for p in chosen_places]
 
-st.button(
-    "+ 친구 추가",
-    on_click=add_friend,
-    disabled=len(st.session_state.friend_ids) >= MAX_FRIENDS,  # 3명이면 더 못 누르게
-)
-if len(st.session_state.friend_ids) >= MAX_FRIENDS:
-    st.caption(f"대중교통 조회 한도(하루 {DAILY_LIMIT}건) 때문에 최대 {MAX_FRIENDS}명까지 입력할 수 있어요.")
+    st.button(
+        "+ 친구 추가",
+        on_click=add_friend,
+        disabled=len(st.session_state.friend_ids) >= MAX_FRIENDS,  # 3명이면 더 못 누르게
+    )
+    if len(st.session_state.friend_ids) >= MAX_FRIENDS:
+        st.caption(f"대중교통 조회 한도(하루 {DAILY_LIMIT}건) 때문에 최대 {MAX_FRIENDS}명까지 입력할 수 있어요.")
 
-# ─────────────────────────────────────────────
-# 3. 추천 기준 선택
-# ─────────────────────────────────────────────
-st.subheader("⚖️ 추천 기준")
-criterion = st.radio(
-    "어떤 약속 장소가 좋을까요?",
-    options=CRITERION_ORDER,
-    format_func=lambda c: f"{CRITERION_EMOJI[c]} {CRITERIA[c]}",  # 화면에 보일 이름
-    captions=[CRITERION_HELP[c] for c in CRITERION_ORDER],  # 각 기준 아래 작은 설명
-    key="criterion",
-)
+    # ─────────────────────────────────────────────
+    # 3. 추천 기준 선택
+    # ─────────────────────────────────────────────
+    st.subheader("⚖️ 추천 기준")
+    criterion = st.radio(
+        "어떤 약속 장소가 좋을까요?",
+        options=CRITERION_ORDER,
+        format_func=lambda c: f"{CRITERION_EMOJI[c]} {CRITERIA[c]}",  # 화면에 보일 이름
+        captions=[CRITERION_HELP[c] for c in CRITERION_ORDER],  # 각 기준 아래 작은 설명
+        key="criterion",
+    )
 
-# ─────────────────────────────────────────────
-# 4. 추천 버튼
-# ─────────────────────────────────────────────
-problem_shown = False  # 이번에 안내(경고/오류)를 보여줬는지
+    # ─────────────────────────────────────────────
+    # 4. 추천 버튼
+    # ─────────────────────────────────────────────
+    problem_shown = False  # 이번에 안내(경고/오류)를 보여줬는지
 
-if st.button("약속 장소 추천받기", type="primary"):
-    if any(text == "" for text in texts):
-        # 빈 칸이 있을 때
-        st.warning("비어 있는 출발지 칸이 있어요. 모든 친구의 출발지를 입력해주세요.")
-        problem_shown = True
-    elif any(place is None for place in chosen_places):
-        # 찾지 못한 출발지가 있을 때 (입력칸 아래에 이미 어떤 칸인지 안내했어요)
-        st.warning("찾지 못한 출발지가 있어요. 입력칸 아래 안내를 확인해주세요.")
-        problem_shown = True
-    else:
-        try:
-            # ODsay를 부를 수 있는 곳은 여기 한 군데뿐이에요. (버튼을 눌렀을 때만)
-            # 후보역 개수는 친구 수에 맞춰 자동으로 정해져요. (2명 → 5곳, 3명 → 3곳)
-            with st.spinner("이동시간 계산 중..."):
-                names = [name for name, lat, lng in places]
-                coords = [(lat, lng) for name, lat, lng in places]
-                table = build_travel_table(names, coords)
-            st.session_state.table = table  # 사물함에 이동시간 표 저장
-            st.session_state.table_places = places  # 어떤 출발지로 만든 표인지도 저장
-        except ValueError as error:
-            # 없는 장소, 오늘 한도 초과, 키 오류 등 → 멈추지 않고 안내만
-            st.error(str(error))
-            st.session_state.table = None
+    if st.button("약속 장소 추천받기", type="primary"):
+        if any(text == "" for text in texts):
+            # 빈 칸이 있을 때
+            st.warning("비어 있는 출발지 칸이 있어요. 모든 친구의 출발지를 입력해주세요.")
             problem_shown = True
+        elif any(place is None for place in chosen_places):
+            # 찾지 못한 출발지가 있을 때 (입력칸 아래에 이미 어떤 칸인지 안내했어요)
+            st.warning("찾지 못한 출발지가 있어요. 입력칸 아래 안내를 확인해주세요.")
+            problem_shown = True
+        else:
+            try:
+                # ODsay를 부를 수 있는 곳은 여기 한 군데뿐이에요. (버튼을 눌렀을 때만)
+                # 후보역 개수는 친구 수에 맞춰 자동으로 정해져요. (2명 → 5곳, 3명 → 3곳)
+                with st.spinner("이동시간 계산 중..."):
+                    names = [name for name, lat, lng in start_places]
+                    coords = [(lat, lng) for name, lat, lng in start_places]
+                    table = build_travel_table(names, coords)
+                st.session_state.table = table  # 사물함에 이동시간 표 저장
+                st.session_state.table_places = start_places  # 어떤 출발지로 만든 표인지도 저장
+            except ValueError as error:
+                # 없는 장소, 오늘 한도 초과, 키 오류 등 → 멈추지 않고 안내만
+                st.error(str(error))
+                st.session_state.table = None
+                problem_shown = True
 
-# ─────────────────────────────────────────────
-# 5. 결과 (사물함의 표로 순위만 계산 → 기준을 바꿔도 ODsay를 다시 부르지 않아요)
-# ─────────────────────────────────────────────
-table = st.session_state.table
+    # ─────────────────────────────────────────────
+    # 5. 결과 (사물함의 표로 순위만 계산 → 기준을 바꿔도 ODsay를 다시 부르지 않아요)
+    # ─────────────────────────────────────────────
+    table = st.session_state.table
 
-if table is not None:
-    if st.session_state.table_places != places:
-        # 추천받은 뒤 출발지를 고쳤다면(친구 추가·삭제, 다른 위치 선택 포함), 옛날 결과는 숨기고 안내합니다.
-        if not problem_shown:
-            st.info("출발지가 바뀌었어요. '약속 장소 추천받기'를 다시 눌러주세요.")
-    else:
-        ranked, excluded = rank_stations(table, criterion)
+    if table is not None:
+        if st.session_state.table_places != start_places:
+            # 추천받은 뒤 출발지를 고쳤다면(친구 추가·삭제, 다른 위치 선택 포함), 옛날 결과는 숨기고 안내합니다.
+            if not problem_shown:
+                st.info("출발지가 바뀌었어요. '약속 장소 추천받기'를 다시 눌러주세요.")
+        else:
+            ranked, excluded = rank_stations(table, criterion)
 
-        # 막대 길이의 기준 = 순위에 든 모든 역 중 가장 오래 걸리는 시간 (모든 카드가 같은 기준)
-        scale_max = max((s["max_time"] for s in ranked), default=0)
+            # 막대 길이의 기준 = 순위에 든 모든 역 중 가장 오래 걸리는 시간 (모든 카드가 같은 기준)
+            scale_max = max((s["max_time"] for s in ranked), default=0)
 
-        st.subheader(f"📍 추천 결과 · {CRITERION_EMOJI[criterion]} {CRITERIA[criterion]}")
+            st.subheader(f"📍 추천 결과 · {CRITERION_EMOJI[criterion]} {CRITERIA[criterion]}")
 
-        # 두 기준의 1위가 같으면 알려줘요
-        if same_top_station(table):
-            st.success("두 기준 모두 같은 역을 추천해요. 모두에게 좋은 장소예요! 👍")
+            # 두 기준의 1위가 같으면 알려줘요
+            if same_top_station(table):
+                st.success("두 기준 모두 같은 역을 추천해요. 모두에게 좋은 장소예요! 👍")
 
-        for rank, station in enumerate(ranked[:CARD_COUNT], start=1):
-            show_station_card(rank, station, table["friends"], scale_max)
-
-        # 4위 이하는 스위치를 켜야 보여요.
-        # (카드 안에 이미 펼치기(expander)가 있어서, 펼치기 안에 또 펼치기를 넣을 수 없기 때문에 스위치를 써요)
-        others = ranked[CARD_COUNT:]
-        if others and st.toggle(f"다른 후보 보기 ({len(others)}곳)", key="show_others"):
-            for rank, station in enumerate(others, start=CARD_COUNT + 1):
+            for rank, station in enumerate(ranked[:CARD_COUNT], start=1):
                 show_station_card(rank, station, table["friends"], scale_max)
+                # 1위 역 카드 바로 아래에 주변 맛집·놀거리 탭 (역 좌표가 있을 때만)
+                if rank == 1 and station.get("lat") is not None:
+                    show_nearby_places(station["name"], (station["lat"], station["lng"]), key="top")
 
-        # 경로를 못 구해서 순위에서 빠진 역
-        for station in excluded:
-            st.warning(f"{station['name']}역은 순위에서 뺐어요. ({station['reason']})")
+            # 4위 이하는 스위치를 켜야 보여요.
+            # (카드 안에 이미 펼치기(expander)가 있어서, 펼치기 안에 또 펼치기를 넣을 수 없기 때문에 스위치를 써요)
+            others = ranked[CARD_COUNT:]
+            if others and st.toggle(f"다른 후보 보기 ({len(others)}곳)", key="show_others"):
+                for rank, station in enumerate(others, start=CARD_COUNT + 1):
+                    show_station_card(rank, station, table["friends"], scale_max)
 
-        if not ranked:
-            st.error("모든 후보역의 경로를 구하지 못했어요. 다른 출발지로 시도해주세요.")
+            # 경로를 못 구해서 순위에서 빠진 역
+            for station in excluded:
+                st.warning(f"{station['name']}역은 순위에서 뺐어요. ({station['reason']})")
+
+            if not ranked:
+                st.error("모든 후보역의 경로를 구하지 못했어요. 다른 출발지로 시도해주세요.")
 
 # ─────────────────────────────────────────────
-# 6. 오늘 ODsay 사용량 (항상 맨 아래에)
+# 6. "이미 장소를 정했어요" 탭: 역 이름 → 주변 맛집·놀거리
+# ─────────────────────────────────────────────
+with decided_tab:
+    st.subheader("📍 이미 장소를 정했어요")
+    station_text = st.text_input("약속 장소(역 이름)", key="decided_station", placeholder="예: 사당역").strip()
+
+    if station_text:
+        try:
+            found = find_station(station_text)
+        except (requests.RequestException, ValueError) as error:
+            st.error(f"'{station_text}' 검색 중 문제가 생겼어요: {error}")
+            found = None
+        else:
+            if found is None:
+                st.warning(f"'{station_text}'(이)라는 지하철역을 찾을 수 없어요. 역 이름을 다시 확인해주세요.")
+
+        if found:
+            st.markdown(geocode.place_label(found))  # 맞는 역인지 확인용 "📍 사당역 2호선 (주소)"
+            show_nearby_places(station_text, (found["lat"], found["lng"]), key="decided")
+
+# ─────────────────────────────────────────────
+# 7. 오늘 ODsay 사용량 (항상 맨 아래에)
 # ─────────────────────────────────────────────
 st.divider()
 st.caption(f"오늘 ODsay 사용량: {get_today_usage()}/{DAILY_LIMIT}건")

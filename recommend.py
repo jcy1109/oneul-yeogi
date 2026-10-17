@@ -137,7 +137,10 @@ def build_travel_table(friends, coords, top_n=None):
                 routes.append({"error": str(error)})
             # 키 오류, 한도 초과 같은 다른 ValueError는 역의 문제가 아니므로 그대로 위로 전달해서 멈춥니다.
 
-        table["stations"].append({"name": station["name"], "routes": routes})
+        # 역 좌표도 함께 적어둬요. (1위 역 주변의 맛집·놀거리를 찾을 때 써요)
+        table["stations"].append({
+            "name": station["name"], "lat": station["lat"], "lng": station["lng"], "routes": routes,
+        })
 
     return table
 
@@ -174,6 +177,8 @@ def rank_stations(table, criterion=DEFAULT_CRITERION):
         times = [route["time_min"] for route in station["routes"]]
         ranked.append({
             "name": station["name"],
+            "lat": station.get("lat"),  # 역 좌표 (가짜 표처럼 좌표가 없으면 None)
+            "lng": station.get("lng"),
             "routes": station["routes"],
             "max_time": max(times),  # 가장 오래 걸리는 친구의 시간
             "total_time": sum(times),  # 모든 친구 시간의 합계
