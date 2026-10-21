@@ -40,6 +40,7 @@ FAKE_PLACES = {
     "잠실역": [place("잠실역", "서울 송파구 올림픽로 265", 37.51330, 127.10010)],
     "롯데월드": LOTTE_WORLD,
     "스타필드시티 위례": [place("스타필드시티 위례", "경기 하남시 위례대로 200", 37.48013, 127.14813)],
+    "복정역": [place("복정역 8호선", "서울 송파구 송파대로 지하 6", 37.47074, 127.12672)],
     "<b>해킹</b>": [place("<b>해킹</b>", "", 37.5, 127.0)],
 }
 
@@ -445,6 +446,7 @@ JEONGJA = (37.3661737923199, 127.108097457244)  # 1위 역(정자) 좌표
 SUWON = (37.26579, 127.00009)  # 가짜 검색 결과의 수원역 좌표
 GANGNAM = (37.49809, 127.028)  # 가짜 검색 결과의 강남역 좌표
 WIRYE = (37.48013, 127.14813)  # 가짜 검색 결과의 스타필드시티 위례 좌표
+BOKJEONG = (37.47074, 127.12672)  # 가짜 검색 결과의 복정역 좌표 (실제 카카오 첫 번째 결과와 같은 곳)
 
 # 1위가 정자인 가짜 이동시간 표 (막차 계산에는 역 좌표가 필요해요)
 JEONGJA_TABLE = {"friends": ["스타필드시티 위례", "수원역"], "stations": [
@@ -459,6 +461,7 @@ def seeded_last_train_files():
       - 정자 → 수원: 실제 길찾기 답장 + 실제 정자역 시간표 (평일 23:38 고색행)
       - 정자 → 강남역: 실제 740번 버스 구간으로 만든 가짜 경로 (약 24:04)
       - 정자 → 스타필드시티 위례: 실제 귀갓길 (수인분당선 → 3217번, 버스 막차 값이 하나뿐)
+      - 정자 → 복정역: 실제 귀갓길 (수인분당선만)
     """
     folder = tempfile.mkdtemp()
     paths = [os.path.join(folder, name) for name in ("cache.json", "timetable.json", "usage.json")]
@@ -469,6 +472,7 @@ def seeded_last_train_files():
         transit.make_cache_key(JEONGJA, GANGNAM): {"time_min": 60, "transfers": 0,
                                                    "segments": transit.parse_segments(bus_path)},
         transit.make_cache_key(JEONGJA, WIRYE): load("route_jeongja_to_wirye.json"),
+        transit.make_cache_key(JEONGJA, BOKJEONG): load("route_jeongja_to_bokjeong.json"),
     })
     with mock.patch("last_train.TIMETABLE_CACHE_PATH", paths[1]):
         last_train.save_timetable("subway", 1530, load("subway_schedule_1530_jeongja_suinbundang.json"))
@@ -550,6 +554,49 @@ def test_last_train_bus_warning():
     assert transit.read_json(usage, {})["count"] == 0  # ODsay 0건 (링크는 주소만 만들어요)
 
 
+def meeting_summary(at):
+    """화면의 "이 모임은 ○○:○○까지 놀 수 있어요 (○○ 친구 기준)" 문장 (없으면 None)"""
+    return next((box.value for box in at.success if "이 모임은" in box.value), None)
+
+
+def test_video_scenario():
+    """
+    [영상 핵심 시나리오 · 결과가 바뀌면 안 돼요] 스타필드시티 위례 + 수원역 → 1위 정자역
+      - 위례 친구 목표 = 복정역: 평일 23:24 (위례 친구 기준), 토요일 23:16 (수원역 친구 기준)
+      - 위례 친구 목표 = 집(빈칸): 평일 21:43 (3217번 버스 → 버스 경고)
+    """
+    cache, timetable, usage = seeded_last_train_files()
+    with mock.patch("transit.CACHE_PATH", cache), mock.patch("transit.USAGE_PATH", usage), \
+            mock.patch("last_train.TIMETABLE_CACHE_PATH", timetable), \
+            mock.patch("recommend.build_travel_table", mock.Mock(return_value=JEONGJA_TABLE)):
+        at = type_places(open_app(), ["스타필드시티 위례", "수원역"])
+        at = click(at, "약속 장소 추천받기")
+        assert at.toggle(key="test_mode").value is True  # 테스트 모드 그대로
+
+        # 1) 위례 친구 목표 = 복정역, 평일
+        goals(at)[0].input("복정역")
+        at = click(at.run(), "🌙 막차 확인하기")
+        assert not at.exception, at.exception
+        assert meeting_summary(at) == "이 모임은 23:24까지 놀 수 있어요 (스타필드시티 위례 친구 기준)"
+        text = all_text(at)
+        assert "    - 🚇 수인.분당선 정자역 **23:35** 열차 (왕십리행)" in text  # 23:35 - 도보 1분 - 여유 10분
+        assert "버스 막차는 실제와 다를 수 있어요" not in text  # 지하철만 타니까 버스 경고 없음
+
+        # 2) 토요일: 위례 23:41 열차가 평일보다 늦고, 수원 23:27이 더 일러서 기준 친구가 바뀌어요
+        at = at.radio(key="day_type").set_value("saturday").run()
+        assert meeting_summary(at) == "이 모임은 23:16까지 놀 수 있어요 (수원역 친구 기준)"
+
+        # 3) 위례 친구 목표 = 집(빈칸), 평일 → 3217번 버스 때문에 21:43, 버스 경고
+        at = at.radio(key="day_type").set_value("weekday").run()
+        goals(at)[0].input("")
+        at = click(at.run(), "🌙 막차 확인하기")
+        assert not at.exception, at.exception
+        assert meeting_summary(at) == "이 모임은 21:43까지 놀 수 있어요 (스타필드시티 위례 친구 기준)"
+        assert "버스 막차는 실제와 다를 수 있어요. 버스 시간표를 꼭 확인하세요." in [w.value for w in at.warning]
+
+    assert transit.read_json(usage, {})["count"] == 0  # 전부 메모장으로 계산 (ODsay 0건)
+
+
 def test_last_train_call_count_and_bad_goal():
     """테스트 모드를 끄면 누르기 전에 필요한 ODsay 건수를 보여주고, 못 찾은 목표 지점이 있으면 안내해야 해요."""
     fake_cache, fake_usage = empty_cache_files()
@@ -579,6 +626,7 @@ if __name__ == "__main__":
         test_friend_name_is_escaped, test_choose_among_results, test_departure_times, test_kakao_map_link,
         test_place_not_found, test_daily_limit_reached, test_test_mode_without_saved_result,
         test_load_saved_example, test_load_saved_example_none, test_last_train_flow, test_last_train_bus_warning,
+        test_video_scenario,
         test_last_train_call_count_and_bad_goal,
     ]
     # 모든 테스트 동안 출발지 검색은 가짜로 바꾸고, 인터넷 요청(카카오·ODsay)은 막아둡니다.
