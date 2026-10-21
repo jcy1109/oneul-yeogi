@@ -32,9 +32,17 @@ BUS_LANE_URL = "https://api.odsay.com/v1/api/busLaneDetail"
 TIMETABLE_CACHE_PATH = os.path.join("data", "timetable_cache.json")
 CACHE_DAYS = 30
 
-# 밤에는 버스가 빨리 달린다고 가정하는 속도(시속 km).
-# 빠르게 가정할수록 정류장 도착 추정이 "실제보다 이르게" 나와서, 틀려도 안전한 쪽이에요.
+# 버스 정류장 도착 시각을 추정할 때 가정하는 속도(시속 km): "더할 땐 빠르게, 뺄 땐 느리게"
+#   - 막차 시각에 이동시간을 "더할" 때는 빠르게(40km) → 도착 추정이 실제보다 이르게 나와요.
+#   - 막차 시각에서 이동시간을 "뺄" 때는 느리게(15km) → 많이 빼서 역시 이르게 나와요.
+# 어느 쪽이든 틀려도 "실제보다 이른 쪽"으로 틀려서 안전해요.
 BUS_NIGHT_SPEED_KMH = 40
+BUS_SLOW_SPEED_KMH = 15
+
+# 버스 구간 시각 옆에 붙이는 표시
+BUS_LABEL_START = "기점 막차"  # 기점·회차점 막차가 모두 있고, 기점에서 바로 탈 때
+BUS_LABEL_UNSURE = "추정 · 확인 필요"  # 막차 값이 하나뿐이라 어느 쪽 기준인지 모를 때
+BUS_LABEL_ESTIMATE = "추정"  # 나머지 (막차 + 거리로 추정)
 
 # 모임 종료 시각을 계산할 때 빼는 여유 시간(분)
 SAFETY_MIN = 10
@@ -162,9 +170,11 @@ def is_fresh(saved_date):
 def load_timetable(kind, code):
     """메모장에서 시간표(또는 버스 노선 정보)를 꺼냅니다. 없거나 30일이 지났으면 None"""
     saved = read_json(TIMETABLE_CACHE_PATH, {}).get(timetable_key(kind, code))
-    if saved and is_fresh(saved["saved"]):
-        return saved["data"]
-    return None
+    if not saved or not is_fresh(saved["saved"]):
+        return None
+    if kind == "bus" and "start_point" not in saved["data"]:
+        return None  # 기점 이름 등을 저장하기 전의 예전 버스 메모 → 다시 물어봐요
+    return saved["data"]
 
 
 def is_timetable_cached(kind, code):
@@ -193,19 +203,26 @@ def trim_subway(data):
 def trim_bus(data):
     """
     ODsay 버스노선 상세정보 답장에서 필요한 것만 남깁니다.
-    결과 예: {"bus_no": "740", "last": "22:40", "ep_last": "24:00", "turning": 46,
+    결과 예: {"bus_no": "740", "start_point": "덕은동", "end_point": "삼성역",
+             "first": "04:00", "last": "22:40", "ep_first": "05:15", "ep_last": "24:00", "turning": 46,
              "interval": "12", "intervals": {"weekday": "12", ...},
-             "stations": [[정류장 코드, 기점부터 누적거리(m)], ...]}
+             "stations": [[정류장 코드, 기점부터 누적거리(m), 정류장 이름], ...]}
+    기점·종점 이름과 첫차, 정류장 이름은 계산에 바로 쓰지 않지만, 실제와 다를 때 원인을 찾으려고 남겨둬요.
+    (3217번처럼 막차가 네이버와 1시간 다를 때, 버린 값 때문에 원인을 바로 못 찾은 적이 있어요)
     """
     result = data["result"]
     return {
         "bus_no": result.get("busNo"),
-        "last": result.get("busLastTime"),  # 기점(출발 차고지) 기준 막차
+        "start_point": result.get("busStartPoint"),  # 기점 이름
+        "end_point": result.get("busEndPoint"),  # 종점(회차점) 이름
+        "first": result.get("busFirstTime"),  # 기점 기준 첫차
+        "last": result.get("busLastTime"),  # 기점 기준 막차 (값이 하나뿐이면 어느 쪽 기준인지 몰라요)
+        "ep_first": result.get("bus_Ep_FirstTime"),  # 회차점(종점) 기준 첫차
         "ep_last": result.get("bus_Ep_LastTime"),  # 회차점(종점) 기준 막차
         "turning": result.get("turningPointIdx"),  # 회차점이 몇 번째 정류장인지
         "interval": result.get("busInterval"),
         "intervals": {day_type: result.get(key) for day_type, key in BUS_INTERVAL_KEYS.items()},
-        "stations": [[s["stationID"], s["stationDistance"]] for s in result.get("station", [])],
+        "stations": [[s["stationID"], s["stationDistance"], s["stationName"]] for s in result.get("station", [])],
     }
 
 
@@ -288,13 +305,62 @@ def subway_departure(ride, bound, day_type, offline=False):
     raise UnsureError(f"{ride['line']} {station_key(stops[0])}역에서 탈 수 있는 열차를 시간표에서 찾지 못했어요")
 
 
+def add_ride(time, distance_m):
+    """막차 시각에 이동시간을 "더해요". 빠른 속도로 계산하고 내림 → 실제보다 이르게"""
+    return time + math.floor(distance_m / 1000 / BUS_NIGHT_SPEED_KMH * 60)
+
+
+def subtract_ride(time, distance_m):
+    """막차 시각에서 이동시간을 "빼요". 느린 속도로 계산하고 올림 → 많이 빼서 실제보다 이르게"""
+    return time - math.ceil(distance_m / 1000 / BUS_SLOW_SPEED_KMH * 60)
+
+
+def bus_stop_last(lane, position):
+    """
+    노선 정보로 position번째 정류장의 막차 도착 시각(분)과 표시 글자를 추정합니다.
+
+    [기점·회차점 막차가 둘 다 있을 때] (예: 740번 22:40 / 24:00)
+      - 회차점 앞 정류장: 기점 막차 + 기점부터 거리
+      - 회차점 뒤 정류장(돌아오는 길): 회차점 막차 + 회차점부터 거리
+    [막차 값이 하나뿐일 때] (예: 3217번 23:45만 있음)
+      그 값이 기점 기준인지 회차점 기준인지 알 수 없어요. (3217번은 회차점 쪽 막차였어요)
+      그래서 두 가지로 다 계산하고 "이른 쪽"을 써요.
+        해석 A (기점 기준): 막차 + 기점부터 거리 (더하기 → 빠르게)
+        해석 B (회차점 기준): 회차점 앞이면 막차 - 정류장부터 회차점까지 거리 (빼기 → 느리게)
+                              회차점 뒤면 막차 + 회차점부터 거리 (더하기 → 빠르게)
+    돌려주는 값: (분, 표시 글자) / 막차 정보가 없으면 UnsureError
+    """
+    distances = [station[1] for station in lane["stations"]]
+    last, ep_last, turning = lane.get("last"), lane.get("ep_last"), lane.get("turning")
+
+    if last and ep_last:
+        if turning is not None and position >= turning:
+            return add_ride(to_minutes(ep_last), distances[position] - distances[turning]), BUS_LABEL_ESTIMATE
+        # 거리 0 = 기점에서 바로 타요. 단, 노선의 0번 정류장이 정말 기점일 때만 "기점 막차"라고 해요.
+        # (3217번은 기점이 송파차고지인데 0번 정류장은 복정역이었어요)
+        first_stop = lane["stations"][0][2] if len(lane["stations"][0]) > 2 else ""
+        is_start = distances[position] == 0 and lane.get("start_point") and lane["start_point"] in first_stop
+        return add_ride(to_minutes(last), distances[position]), BUS_LABEL_START if is_start else BUS_LABEL_ESTIMATE
+
+    single = last or ep_last
+    if not single:
+        raise UnsureError("막차 시각 정보가 없어요")
+    single = to_minutes(single)
+    candidates = [add_ride(single, distances[position])]  # 해석 A
+    if turning is not None:
+        if position < turning:
+            candidates.append(subtract_ride(single, distances[turning] - distances[position]))  # 해석 B
+        else:
+            candidates.append(add_ride(single, distances[position] - distances[turning]))  # 해석 B
+    return min(candidates), BUS_LABEL_UNSURE
+
+
 def bus_departure(ride, bound, day_type, offline=False):
     """
-    버스 구간에서 탈 정류장의 "마지막으로 탈 수 있는 시각"을 추정합니다. (분)
+    버스 구간에서 탈 정류장의 "마지막으로 탈 수 있는 시각"을 추정합니다.
+    돌려주는 값: (분, 표시 글자, 버스 번호)
 
-    정류장 막차 ≈ 막차의 출발 시각 + 그 정류장까지 거리 ÷ 밤 속도(시속 40km)
-      - 탈 정류장이 회차점 앞이면: 기점 막차(busLastTime) + 기점부터 거리
-      - 회차점 뒤(돌아오는 길)이면: 회차점 막차(bus_Ep_LastTime) + 회차점부터 거리
+    정류장 막차는 bus_stop_last로 추정해요.
     다음 구간 때문에 bound가 정류장 막차보다 이르면, 그 직전 버스가 언제 올지 몰라서
     bound에서 배차간격만큼 더 빼요. (최악의 경우를 가정 → 틀려도 이른 쪽)
     """
@@ -303,29 +369,22 @@ def bus_departure(ride, bound, day_type, offline=False):
         raise UnsureError(f"{ride['line']} 노선 정보가 없어요")
     lane = get_timetable(kind, bus_id, offline)
 
-    distances = [distance for station_id, distance in lane["stations"]]
-    ids = [station_id for station_id, distance in lane["stations"]]
+    ids = [station[0] for station in lane["stations"]]
     if ride.get("start_id") not in ids:
         raise UnsureError(f"{ride['line']} 노선에서 {ride['start']} 정류장을 찾지 못했어요")
-    position = ids.index(ride["start_id"])
+    try:
+        arrive, label = bus_stop_last(lane, ids.index(ride["start_id"]))
+    except UnsureError as error:
+        raise UnsureError(f"{ride['line']} {error}")
 
-    turning = lane.get("turning")
-    if turning is not None and position >= turning:
-        base_text, distance = lane.get("ep_last"), distances[position] - distances[turning]
-    else:
-        base_text, distance = lane.get("last"), distances[position]
-    if not base_text:
-        raise UnsureError(f"{ride['line']} 막차 시각 정보가 없어요")
-
-    # 내림(floor)으로 계산해서 도착 추정이 조금이라도 이르게 나오게 해요
-    arrive = to_minutes(base_text) + math.floor(distance / 1000 / BUS_NIGHT_SPEED_KMH * 60)
     if arrive <= bound:
-        return arrive
+        return arrive, label, lane.get("bus_no")
 
     interval = parse_interval(lane["intervals"].get(day_type) or lane.get("interval"))
     if interval is None:
         raise UnsureError(f"{ride['line']} 배차간격을 알 수 없어요")
-    return bound - interval
+    # 막차가 아니라 "그 전 버스"를 타야 하니, 기점 막차라도 추정이 돼요
+    return bound - interval, (BUS_LABEL_UNSURE if label == BUS_LABEL_UNSURE else BUS_LABEL_ESTIMATE), lane.get("bus_no")
 
 
 # ─────────────────────────────────────────────
@@ -349,7 +408,9 @@ def plan_route(route, day_type, offline=False):
     돌려주는 값 예시 (status로 종류를 구분해요)
       {"status": "ok", "leave_by": 1393, "walk_min": 1,
        "legs": [{"type": "subway", "line": "수인.분당선", "start": "정자", "depart": 1418,
-                 "estimated": False, "terminus": "고색"}, ...]}
+                 "estimated": False, "terminus": "고색"},
+                {"type": "bus", "line": "3217번", "start": "복정역환승센터3번승강장", "depart": 1345,
+                 "estimated": True, "label": "추정 · 확인 필요", "bus_no": "3217"}]}
       {"status": "many"}                         ← 구간 3개 이상
       {"status": "unsure", "reason": "..."}      ← 확실하게 판단할 수 없음
     """
@@ -375,17 +436,14 @@ def plan_route(route, day_type, offline=False):
         try:
             if ride["type"] == "subway":
                 departure, terminus = subway_departure(ride, bound, day_type, offline)
-                estimated = False
+                leg = {"terminus": terminus, "estimated": False}
             else:
-                departure, terminus = bus_departure(ride, bound, day_type, offline), None
-                estimated = True  # 버스는 노선 막차로 추정한 값
+                departure, label, bus_no = bus_departure(ride, bound, day_type, offline)
+                leg = {"label": label, "bus_no": bus_no, "estimated": label != BUS_LABEL_START}
         except UnsureError as error:
             return {"status": "unsure", "reason": str(error)}
 
-        legs.insert(0, {
-            "type": ride["type"], "line": ride["line"], "start": ride["start"],
-            "depart": departure, "estimated": estimated, "terminus": terminus,
-        })
+        legs.insert(0, {"type": ride["type"], "line": ride["line"], "start": ride["start"], "depart": departure, **leg})
         next_departure = departure
 
     walk_min = walk_minutes_between(segments, 0, rides[0][0])  # 1위 역에서 첫 타는 곳까지 걷는 시간
@@ -473,21 +531,30 @@ def meeting_end(results, friends):
     """
     모임 종료 시각 = 친구들 중 가장 이른 "1위 역에서 늦어도 나서야 하는 시각" - 여유 10분
     ("나서야 하는 시각"에는 이미 1위 역에서 타는 곳까지 걷는 시간이 빠져 있어요)
-    돌려주는 값: {"end": 분, "friend": 기준이 된 친구 이름}, 계산할 수 있는 친구가 없으면 None
+    돌려주는 값: {"end": 분, "friend": 기준이 된 친구 이름, "index": 그 친구의 순서}, 계산할 수 있는 친구가 없으면 None
+    (같은 이름의 친구가 둘일 수도 있어서, 화면에서 그 친구의 결과를 찾을 땐 순서(index)를 써요)
     """
-    candidates = [(result["leave_by"], friend) for result, friend in zip(results, friends) if result["status"] == "ok"]
+    candidates = [(result["leave_by"], i) for i, result in enumerate(results) if result["status"] == "ok"]
     if not candidates:
         return None
-    leave_by, friend = min(candidates, key=lambda c: c[0])
-    return {"end": leave_by - SAFETY_MIN, "friend": friend}
+    leave_by, index = min(candidates)
+    return {"end": leave_by - SAFETY_MIN, "friend": friends[index], "index": index}
+
+
+def has_bus(result):
+    """친구의 막차 결과에 버스 구간이 있으면 True (버스 막차는 실제와 다를 수 있어서 경고를 붙여요)"""
+    return any(leg["type"] == "bus" for leg in result.get("legs", []))
 
 
 def leg_text(leg):
     """
     구간 하나를 화면용 글자로 바꿉니다.
-    예) "🚇 수인.분당선 정자역 **23:38** 열차 (고색행)", "🚌 38번 복정역환승센터 **약 23:40 (추정)**"
+    예) "🚇 수인.분당선 정자역 **23:38** 열차 (고색행)"
+        "🚌 740번 덕은동종점 **22:40 (기점 막차)**"
+        "🚌 3217번 복정역환승센터3번승강장 **약 22:25 (추정 · 확인 필요)**"
     """
     if leg["type"] == "subway":
         start = leg["start"] if leg["start"].endswith("역") else leg["start"] + "역"
         return f"🚇 {leg['line']} {start} **{clock_text(leg['depart'])}** 열차 ({leg['terminus']}행)"
-    return f"🚌 {leg['line']} {leg['start']} **약 {clock_text(leg['depart'])} (추정)**"
+    about = "약 " if leg["estimated"] else ""
+    return f"🚌 {leg['line']} {leg['start']} **{about}{clock_text(leg['depart'])} ({leg['label']})**"

@@ -13,7 +13,7 @@ import streamlit as st  # 파이썬 코드를 웹 화면으로 바꿔주는 도�
 
 import geocode  # 출발지 검색(주소 → 키워드 순서) 도구
 from last_train import (
-    MANY_RIDES_MESSAGE, clock_text, count_last_train_calls, leg_text, meeting_end, plan_last_trains,
+    MANY_RIDES_MESSAGE, clock_text, count_last_train_calls, has_bus, leg_text, meeting_end, plan_last_trains,
 )
 from recommend import (
     CRITERIA, DAY_TYPES, DEFAULT_CRITERION, DEFAULT_DAY_TYPE, build_travel_table,
@@ -32,6 +32,11 @@ PLACE_HINT = "주소, 아파트 이름, 역 이름 모두 가능해요"
 # 친구별 "귀가 목표 지점" 입력칸 (비워두면 출발지까지로 계산해요)
 GOAL_LABEL = "🌙 막차로 꼭 도착해야 하는 곳 (선택)"
 GOAL_HINT = "예: 수원역까지만 가면 택시 탈 수 있어요 · 비워두면 출발지까지"
+GOAL_TIP = "지하철역으로 정하면 더 정확해요. 버스 막차는 노선 정보로 추정해서 실제와 다를 수 있거든요."
+GOAL_SUBWAY_HINT = "💡 '막차로 꼭 도착해야 하는 곳'을 지하철역으로 정하면 더 정확해요."
+
+# 모임 종료의 기준이 된 친구가 버스를 탈 때 보여줄 경고
+BUS_WARNING = "버스 막차는 실제와 다를 수 있어요. 버스 시간표를 꼭 확인하세요."
 
 # 막차 결과 아래에 작게 보여줄 안내
 LAST_TRAIN_NOTE = (
@@ -252,6 +257,14 @@ def show_station_card(rank, station, friends, scale_max, meeting_time):
                 st.markdown("\n".join(f"- {line}" for line in route_details(route)))
 
 
+def bus_map_url(bus_no):
+    """
+    카카오맵에서 버스 노선을 검색한 화면의 링크를 만듭니다. (카카오 API를 부르지 않고 주소만 만들어요)
+    예) "3217" → "https://map.kakao.com/?q=3217%EB%B2%88%20%EB%B2%84%EC%8A%A4" ("3217번 버스"를 검색)
+    """
+    return f"https://map.kakao.com/?q={quote(f'{bus_no}번 버스')}"
+
+
 def last_train_lines(friend, goal_name, result, station_name):
     """친구 한 명의 막차 결과를 화면용 목록 줄들로 바꿉니다. (구간별 줄은 한 칸 들여써요)"""
     head = f"- 🏠 **{friend}** 친구 → {goal_name}"
@@ -334,6 +347,16 @@ def show_last_trains(top, friends, places, goal_texts, goal_places, day_type, me
         if end["end"] <= meeting_minutes:
             st.warning(f"막차 때문에 약속 시각({meeting_time:%H:%M})보다 일찍 헤어져야 해요. 다른 장소도 고려해보세요.")
 
+        # 기준이 된 친구가 버스를 타면: 버스 막차는 ODsay 노선 정보로 추정해서 틀릴 수 있어요
+        # (3217번은 ODsay 23:45, 실제 22:45였어요) → 경고와 실제 시간표를 볼 수 있는 링크
+        limiting = results[end["index"]]
+        if has_bus(limiting):
+            st.warning(BUS_WARNING, icon="⚠️")
+            bus_numbers = [leg["bus_no"] for leg in limiting["legs"] if leg["type"] == "bus" and leg.get("bus_no")]
+            if bus_numbers:
+                st.markdown(" · ".join(f"[🚌 카카오맵에서 {no}번 버스 시간표 보기]({bus_map_url(no)})"
+                                       for no in bus_numbers))
+
     lines = []
     for friend, goal_name, result in zip(friends, goal_names, results):
         lines += last_train_lines(friend, goal_name, result, top["name"])
@@ -344,6 +367,7 @@ def show_last_trains(top, friends, places, goal_texts, goal_places, day_type, me
     if end and left_out:
         st.warning(f"{', '.join(left_out)} 친구는 확인이 필요해서 모임 종료 시각 계산에서 빠졌어요.", icon="⚠️")
     st.caption(LAST_TRAIN_NOTE)
+    st.caption(GOAL_SUBWAY_HINT)
 
 
 # ─────────────────────────────────────────────
@@ -402,7 +426,7 @@ for position, friend_id in enumerate(st.session_state.friend_ids):
     chosen_places.append(choose_place(text, friend_id))
 
     # 귀가 목표 지점 (선택). 비워두면 None → 출발지까지로 계산해요.
-    goal_text = st.text_input(GOAL_LABEL, key=f"goal_{friend_id}", placeholder=GOAL_HINT).strip()
+    goal_text = st.text_input(GOAL_LABEL, key=f"goal_{friend_id}", placeholder=GOAL_HINT, help=GOAL_TIP).strip()
     goal_texts.append(goal_text)
     goal_places.append(choose_place(goal_text, f"goal_{friend_id}") if goal_text else None)
 

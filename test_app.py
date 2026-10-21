@@ -444,6 +444,7 @@ def test_load_saved_example_none():
 JEONGJA = (37.3661737923199, 127.108097457244)  # 1위 역(정자) 좌표
 SUWON = (37.26579, 127.00009)  # 가짜 검색 결과의 수원역 좌표
 GANGNAM = (37.49809, 127.028)  # 가짜 검색 결과의 강남역 좌표
+WIRYE = (37.48013, 127.14813)  # 가짜 검색 결과의 스타필드시티 위례 좌표
 
 # 1위가 정자인 가짜 이동시간 표 (막차 계산에는 역 좌표가 필요해요)
 JEONGJA_TABLE = {"friends": ["스타필드시티 위례", "수원역"], "stations": [
@@ -457,6 +458,7 @@ def seeded_last_train_files():
     막차 계산에 필요한 메모장을 임시 폴더에 만들어요. (메모장 경로, 시간표 메모장 경로, 기록부 경로)
       - 정자 → 수원: 실제 길찾기 답장 + 실제 정자역 시간표 (평일 23:38 고색행)
       - 정자 → 강남역: 실제 740번 버스 구간으로 만든 가짜 경로 (약 24:04)
+      - 정자 → 스타필드시티 위례: 실제 귀갓길 (수인분당선 → 3217번, 버스 막차 값이 하나뿐)
     """
     folder = tempfile.mkdtemp()
     paths = [os.path.join(folder, name) for name in ("cache.json", "timetable.json", "usage.json")]
@@ -466,10 +468,12 @@ def seeded_last_train_files():
         transit.make_cache_key(JEONGJA, SUWON): transit.parse_transit_response(load("path_jeongja_to_suwon.json")),
         transit.make_cache_key(JEONGJA, GANGNAM): {"time_min": 60, "transfers": 0,
                                                    "segments": transit.parse_segments(bus_path)},
+        transit.make_cache_key(JEONGJA, WIRYE): load("route_jeongja_to_wirye.json"),
     })
     with mock.patch("last_train.TIMETABLE_CACHE_PATH", paths[1]):
         last_train.save_timetable("subway", 1530, load("subway_schedule_1530_jeongja_suinbundang.json"))
         last_train.save_timetable("bus", 1273, load("bus_lane_1273_bus740.json"))
+        last_train.save_timetable("bus", 1018, load("bus_lane_1018_bus3217.json"))
     return paths
 
 
@@ -500,6 +504,9 @@ def test_last_train_flow():
         assert "    - 🚌 740번 강남역9번출구 **약 00:04 (추정)**" in text
         assert "📅 평일 시간표 기준" in text
         assert "경로는 평소 기준이라 밤늦게는 다를 수 있어요" in text
+        assert "💡 '막차로 꼭 도착해야 하는 곳'을 지하철역으로 정하면 더 정확해요." in text
+        # 기준이 된 수원역 친구는 지하철만 타니까 버스 경고는 없어요
+        assert "버스 막차는 실제와 다를 수 있어요" not in all_text(at)
 
         # 토요일로 바꾸면 버튼을 다시 누르지 않아도 토요일 시간표로 다시 계산해요 (수원 23:27 열차)
         at = at.radio(key="day_type").set_value("saturday").run()
@@ -514,6 +521,33 @@ def test_last_train_flow():
         assert "이 모임은" not in all_success(at)
 
     assert transit.read_json(usage, {})["count"] == 0  # ODsay 0건
+
+
+def test_last_train_bus_warning():
+    """
+    [실제 데이터] 위례 친구(수인분당선 → 3217번 버스)가 모임 종료 기준이면,
+    버스 막차 경고와 카카오맵 버스 노선 링크가 나오고, 막차 값이 하나뿐인 3217번은 이른 쪽 해석을 써야 해요.
+    """
+    cache, timetable, usage = seeded_last_train_files()
+    with mock.patch("transit.CACHE_PATH", cache), mock.patch("transit.USAGE_PATH", usage), \
+            mock.patch("last_train.TIMETABLE_CACHE_PATH", timetable), \
+            mock.patch("recommend.build_travel_table", mock.Mock(return_value=JEONGJA_TABLE)):
+        at = click(type_places(open_app(), ["스타필드시티 위례", "수원역"]), "약속 장소 추천받기")
+        at = click(at, "🌙 막차 확인하기")  # 두 친구 모두 목표 지점은 빈칸 → 출발지까지
+        assert not at.exception, at.exception
+        text = all_text(at)
+
+        # 3217번: ODsay 막차 23:45 하나뿐 → 회차점 기준 해석(23:45 - 80분) 22:25를 써요 (네이버 실제 22:45)
+        assert "    - 🚌 3217번 복정역환승센터3번승강장 **약 22:25 (추정 · 확인 필요)**" in text
+        summary = next(box.value for box in at.success if "이 모임은" in box.value)
+        assert summary.endswith("(스타필드시티 위례 친구 기준)"), summary
+
+        warning = next(box for box in at.warning if "버스 막차는" in box.value)
+        assert (warning.value, warning.icon) == ("버스 막차는 실제와 다를 수 있어요. 버스 시간표를 꼭 확인하세요.", "⚠️")
+        link = f"[🚌 카카오맵에서 3217번 버스 시간표 보기](https://map.kakao.com/?q={quote('3217번 버스')})"
+        assert link in text
+
+    assert transit.read_json(usage, {})["count"] == 0  # ODsay 0건 (링크는 주소만 만들어요)
 
 
 def test_last_train_call_count_and_bad_goal():
@@ -544,7 +578,7 @@ if __name__ == "__main__":
         test_empty_input, test_result_cards_and_switch_criterion, test_travel_bars, test_same_winner_message,
         test_friend_name_is_escaped, test_choose_among_results, test_departure_times, test_kakao_map_link,
         test_place_not_found, test_daily_limit_reached, test_test_mode_without_saved_result,
-        test_load_saved_example, test_load_saved_example_none, test_last_train_flow,
+        test_load_saved_example, test_load_saved_example_none, test_last_train_flow, test_last_train_bus_warning,
         test_last_train_call_count_and_bad_goal,
     ]
     # 모든 테스트 동안 출발지 검색은 가짜로 바꾸고, 인터넷 요청(카카오·ODsay)은 막아둡니다.

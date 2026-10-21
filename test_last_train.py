@@ -3,7 +3,8 @@
 #
 # ⚠️ 이 테스트는 ODsay를 한 번도 실제로 부르지 않아요!
 #    - test_data/ 폴더의 답장은 2026-10-21에 실제로 받은 ODsay 답장을 줄인 것이에요. (API 키·개인정보 없음)
-#      정자역·강남역 지하철 시간표, 740번 버스 노선, 정자→수원 / 강남→홍대입구 길찾기
+#      정자역·강남역 지하철 시간표, 740번·3217번 버스 노선, 정자→수원 / 강남→홍대입구 길찾기
+#      (정자→위례 귀갓길은 실제 답장을 우리 앱 모양으로 정리해서 메모장에 저장된 것이에요)
 #    - 특별한 경우(갈래 노선, 순환선, 환승 3번 등)는 작은 가짜 경로를 직접 만들어서 확인해요.
 #    - 메모장 파일은 임시 폴더를 써서, 진짜 메모장과 기록부는 건드리지 않아요.
 
@@ -40,6 +41,7 @@ def fresh_files(seed=True):
         last_train.save_timetable("subway", 1530, load("subway_schedule_1530_jeongja_suinbundang.json"))
         last_train.save_timetable("subway", 222, load("subway_schedule_222_gangnam_line2.json"))
         last_train.save_timetable("bus", 1273, load("bus_lane_1273_bus740.json"))
+        last_train.save_timetable("bus", 1018, load("bus_lane_1018_bus3217.json"))
 
 
 def real_route(name):
@@ -130,7 +132,48 @@ def test_real_bus_740_turning_point():
     # 24:00 + 회차점부터 3,255m ÷ 시속 40km(4.9분 → 내림 4분) = 24:04
     # (기점 막차 22:40으로 계산했다면 23:20으로 44분이나 틀렸을 거예요)
     assert clock_text(leg["depart"]) == "00:04" and leg["estimated"]
+    assert (leg["label"], leg["bus_no"]) == ("추정", "740")
     assert "**약 00:04 (추정)**" in last_train.leg_text(leg)
+
+
+def test_real_bus_740_start_label():
+    """[실제 데이터] 740번을 기점(덕은동종점, 0번 정류장)에서 타면 기점 막차 22:40 그대로, "(기점 막차)"로 표시해요."""
+    fresh_files()
+    ride = {"type": "bus", "line": "740번", "start": "덕은동종점", "minutes": 30, "start_id": 101691, "bus_ids": [1273]}
+    result = plan_route({"segments": [ride]}, "weekday", offline=True)
+    leg = result["legs"][0]
+    assert (clock_text(leg["depart"]), leg["label"], leg["estimated"]) == ("22:40", "기점 막차", False)
+    assert last_train.leg_text(leg) == "🚌 740번 덕은동종점 **22:40 (기점 막차)**"
+
+
+def test_real_bus_3217_single_value():
+    """
+    [실제 데이터] 3217번은 막차 값이 23:45 하나뿐이에요. (네이버 확인: 복정역 출발 막차 22:45)
+    두 해석 중 이른 쪽(23:45 - 회차점까지 19.8km ÷ 시속 15km = 22:25)을 쓰고, "(추정 · 확인 필요)"로 표시해야 해요.
+    """
+    fresh_files()
+    route = load("route_jeongja_to_wirye.json")  # 정자 → [수인분당선] → 복정 → [3217번] → 위례
+    result = plan_route(route, "weekday", offline=True)
+    assert result["status"] == "ok", result
+    subway_leg, bus_leg = result["legs"]
+
+    # 버스: 해석 A(기점 기준) 23:45 + 0분 / 해석 B(회차점 기준) 23:45 - 80분 = 22:25 → 이른 쪽
+    assert (clock_text(bus_leg["depart"]), bus_leg["label"]) == ("22:25", "추정 · 확인 필요")
+    assert bus_leg["depart"] <= to_minutes("22:45")  # 네이버 실제 막차보다 이르거나 같아야 안전해요
+    assert last_train.leg_text(bus_leg) == "🚌 3217번 복정역환승센터3번승강장 **약 22:25 (추정 · 확인 필요)**"
+
+    # 지하철: 22:25 - 19분(이동) - 1분(환승 도보) = 22:05 이전의 마지막 왕십리 방향 열차
+    assert subway_leg["depart"] <= to_minutes("22:05")
+    assert last_train.has_bus(result)
+
+
+def test_old_bus_memo_is_refetched():
+    """기점 이름 등을 저장하기 전의 예전 버스 메모는 '없는 것'으로 보고 다시 물어봐야 해요."""
+    fresh_files(seed=False)
+    old = {"bus_no": "3217", "last": "23:45", "ep_last": None, "turning": 41, "interval": "12",
+           "intervals": {}, "stations": [[5008839, 0]]}  # 예전 모양
+    transit.write_json(last_train.TIMETABLE_CACHE_PATH, {"bus:1018": {"saved": transit.today_kst(), "data": old}})
+    assert not last_train.is_timetable_cached("bus", 1018)
 
 
 def test_bus_bound_minus_interval():
@@ -138,7 +181,7 @@ def test_bus_bound_minus_interval():
     fresh_files()
     bus_path = load("path_gangnam_to_hongdae_bus_only.json")["result"]["path"][0]["subPath"]
     ride = transit.parse_segments(bus_path)[1]
-    assert last_train.bus_departure(ride, to_minutes("23:30"), "weekday", offline=True) == to_minutes("23:18")
+    assert last_train.bus_departure(ride, to_minutes("23:30"), "weekday", offline=True) == (to_minutes("23:18"), "추정", "740")
 
 
 def test_backward_two_rides():
@@ -292,7 +335,7 @@ def test_meeting_end():
         {"status": "unsure", "reason": "..."},
     ]
     end = last_train.meeting_end(results, ["수원역", "스타필드시티 위례", "강남역"])
-    assert end == {"end": to_minutes("23:00"), "friend": "스타필드시티 위례"}
+    assert end == {"end": to_minutes("23:00"), "friend": "스타필드시티 위례", "index": 1}
     assert last_train.meeting_end([{"status": "many"}], ["수원역"]) is None
 
 
@@ -300,7 +343,8 @@ def test_meeting_end():
 if __name__ == "__main__":
     tests = [
         test_time_helpers, test_real_jeongja_to_suwon, test_real_gangnam_line2_after_midnight,
-        test_real_bus_740_turning_point, test_bus_bound_minus_interval, test_backward_two_rides, test_many_rides,
+        test_real_bus_740_turning_point, test_real_bus_740_start_label, test_real_bus_3217_single_value,
+        test_old_bus_memo_is_refetched, test_bus_bound_minus_interval, test_backward_two_rides, test_many_rides,
         test_branch_line_unsure, test_branch_line_without_junction, test_circle_line_seongsu,
         test_express_only_for_express_route, test_station_name_variants, test_timetable_cache_30_days,
         test_offline_timetable_missing, test_plan_friend_and_count_calls, test_budget_check, test_meeting_end,
