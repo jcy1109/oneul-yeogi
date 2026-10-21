@@ -41,9 +41,11 @@ EXPECTED_OK = {
     "time_min": 40, "transfers": 1, "fare": 1850,
     "segments": [
         {"type": "walk", "minutes": 1, "distance_m": 37},
-        {"type": "subway", "line": "2호선", "start": "강남", "end": "사당", "minutes": 9, "stations": 4},
+        {"type": "subway", "line": "2호선", "start": "강남", "end": "사당", "minutes": 9, "stations": 4,
+         "start_id": None, "end_id": None, "way_code": None, "stops": []},  # 가짜 답장엔 코드가 없어서 None
         {"type": "walk", "minutes": 3, "distance_m": 0},
-        {"type": "subway", "line": "4호선", "start": "사당", "end": "금정", "minutes": 23, "stations": 10},
+        {"type": "subway", "line": "4호선", "start": "사당", "end": "금정", "minutes": 23, "stations": 10,
+         "start_id": None, "end_id": None, "way_code": None, "stops": []},
         {"type": "walk", "minutes": 1, "distance_m": 14},
     ],
 }
@@ -95,10 +97,33 @@ def test_cache():
 
 
 def test_cache_key_rounds_start():
-    """메모장 제목: 출발지는 소수점 3자리(약 100m)로 반올림, 도착지(역)는 5자리 그대로여야 해요."""
-    key = transit.make_cache_key((37.4980123, 127.0279876), END)
-    assert key == "37.498,127.028->37.37247,126.94347"
+    """메모장 제목: 출발지와 도착지 모두 소수점 3자리(약 100m)로 반올림해야 해요. (귀갓길은 도착지가 집이에요)"""
+    key = transit.make_cache_key((37.4980123, 127.0279876), (37.2657912, 127.0000934))
+    assert key == "37.498,127.028->37.266,127.000"
     assert "37.4980123" not in key and "37.49801" not in key  # 정확한 출발 위치는 남지 않음
+    assert "37.26579" not in key  # 정확한 도착 위치도 남지 않음
+
+
+def test_migrate_cache_keys():
+    """예전 메모장 제목을 새 모양으로 옮기고, 원본은 백업해야 해요. 두 번 실행해도 안전해야 해요."""
+    fresh_files()
+    transit.CACHE_BACKUP_PATH = transit.CACHE_PATH + ".backup"
+    old = {
+        "37.498,127.028->37.37247,126.94347": {"time_min": 40, "segments": []},  # 예전 모양
+        "37.498,127.028->37.37210,126.94339": {"time_min": 99, "segments": []},  # 같은 100m 칸 → 겹침
+        "37.266,127.000->37.373,126.943": {"error": "경로 없음"},  # 이미 새 모양
+    }
+    transit.write_json(transit.CACHE_PATH, old)
+
+    assert transit.migrate_cache_keys() == (2, 1)  # 2개 제목이 바뀌고, 1개는 겹쳐서 버림
+    assert transit.read_json(transit.CACHE_PATH, {}) == {
+        "37.498,127.028->37.372,126.943": {"time_min": 40, "segments": []},  # 처음 것이 남아요
+        "37.266,127.000->37.373,126.943": {"error": "경로 없음"},
+    }
+    assert transit.read_json(transit.CACHE_BACKUP_PATH, {}) == old  # 원본 그대로 백업
+
+    assert transit.migrate_cache_keys() == (0, 0)  # 두 번째는 할 일 없음
+    assert transit.read_json(transit.CACHE_BACKUP_PATH, {}) == old  # 백업도 그대로
 
 
 def test_same_neighborhood_shares_cache():
@@ -123,6 +148,22 @@ def test_same_neighborhood_shares_cache():
     with open(transit.CACHE_PATH, encoding="utf-8") as f:
         saved = f.read()
     assert "37.49812" not in saved and "37.49805" not in saved
+
+
+def test_detailed_cache():
+    """막차 계산용(detailed)으로는 타는 곳 코드가 없는 예전 기록을 '없는 것'으로 봐야 해요."""
+    fresh_files()
+    old_memo = {"time_min": 40, "transfers": 0, "segments": [
+        {"type": "walk", "minutes": 1, "distance_m": 37},
+        {"type": "subway", "line": "2호선", "start": "강남", "end": "사당", "minutes": 9, "stations": 4},
+    ]}
+    transit.write_json(transit.CACHE_PATH, {transit.make_cache_key(START, END): old_memo})
+    assert transit.is_cached(START, END)  # 추천(이동시간)에는 그대로 써요
+    assert not transit.is_cached(START, END, detailed=True)  # 막차 계산에는 다시 물어봐야 해요
+
+    old_memo["segments"][1]["start_id"] = 222
+    transit.write_json(transit.CACHE_PATH, {transit.make_cache_key(START, END): old_memo})
+    assert transit.is_cached(START, END, detailed=True)
 
 
 def test_segments_parsed():
@@ -228,7 +269,7 @@ def test_offline_mode():
 
 # 이 파일을 직접 실행하면 위의 테스트들을 차례로 실행합니다.
 if __name__ == "__main__":
-    tests = [test_cache, test_cache_key_rounds_start, test_same_neighborhood_shares_cache, test_segments_parsed, test_old_cache_without_segments, test_wrong_key, test_too_close, test_daily_limit, test_new_day, test_network_error, test_offline_mode]
+    tests = [test_cache, test_cache_key_rounds_start, test_migrate_cache_keys, test_detailed_cache, test_same_neighborhood_shares_cache, test_segments_parsed, test_old_cache_without_segments, test_wrong_key, test_too_close, test_daily_limit, test_new_day, test_network_error, test_offline_mode]
     for test in tests:
         test()  # 실패하면 여기서 AssertionError가 나며 멈춰요
         print(f"✅ {test.__name__}: {test.__doc__.strip().splitlines()[0]}")

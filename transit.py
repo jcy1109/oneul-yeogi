@@ -25,6 +25,7 @@ DAILY_LIMIT = 30
 
 # 메모장(캐시)과 호출 기록부 파일 위치
 CACHE_PATH = os.path.join("data", "transit_cache.json")
+CACHE_BACKUP_PATH = os.path.join("data", "transit_cache.backup.json")  # 메모장 제목을 바꾸기 전 원본
 USAGE_PATH = os.path.join("data", "odsay_usage.json")
 
 # 한국 시간(UTC+9). ODsay의 "하루"는 한국 시간 기준이라서 이걸로 날짜를 셉니다.
@@ -106,41 +107,116 @@ def make_cache_key(start, end):
     """
     출발-도착 좌표로 메모장의 "제목"을 만듭니다.
 
-    - 출발지(친구의 집 등)는 소수점 3자리(약 100m)로 반올림해요.
-      → 정확한 집 위치가 메모장에 남지 않고, 같은 동네(약 100m 안)끼리는 기록을 함께 써요.
-        ("○○아파트 101동"이 아니라 "○○동 근처"까지만 적는 셈이에요)
-    - 도착지(후보역)는 공공장소라서 소수점 5자리(약 1m)까지 그대로 써요.
-    예) "37.498,127.028->37.37247,126.94347"
+    출발지와 도착지 모두 소수점 3자리(약 100m)로 반올림해요.
+    → 귀갓길(추천역 → 집)처럼 도착지가 집이어도 정확한 집 위치가 메모장에 남지 않아요.
+      ("○○아파트 101동"이 아니라 "○○동 근처"까지만 적는 셈이에요)
+    → 같은 동네(약 100m 안)끼리는 기록을 함께 써요.
+    예) "37.498,127.028->37.372,126.943"
     """
-    return f"{start[0]:.3f},{start[1]:.3f}->{end[0]:.5f},{end[1]:.5f}"
+    return f"{start[0]:.3f},{start[1]:.3f}->{end[0]:.3f},{end[1]:.3f}"
 
 
-def is_usable_cache(saved):
+def migrate_cache_keys():
+    """
+    예전 모양의 메모장 제목(도착지 소수점 5자리)을 새 모양(출발지·도착지 모두 3자리)으로 옮깁니다.
+    옮기기 전에 원본을 data/transit_cache.backup.json에 그대로 복사해둬요. (백업이 이미 있으면 덮어쓰지 않아요)
+    여러 기록이 같은 새 제목이 되면(100m 안의 두 장소) 처음 것만 남겨요.
+
+    돌려주는 값: (바뀐 제목 수, 겹쳐서 버린 기록 수). 이미 새 모양이면 (0, 0)이고 아무 파일도 건드리지 않아요.
+    """
+    cache = read_json(CACHE_PATH, {})
+    migrated = {}
+    changed = 0
+    dropped = 0
+    for key, value in cache.items():
+        # "37.498,127.028->37.37247,126.94347" → 숫자 4개를 꺼내서 다시 반올림
+        start_text, end_text = key.split("->")
+        start = [float(x) for x in start_text.split(",")]
+        end = [float(x) for x in end_text.split(",")]
+        new_key = make_cache_key(start, end)
+        if new_key != key:
+            changed += 1
+        if new_key in migrated:
+            dropped += 1  # 같은 동네의 두 기록 → 처음 것만 남겨요
+            continue
+        migrated[new_key] = value
+
+    if changed == 0:
+        return 0, 0  # 이미 새 모양이라 할 일이 없어요
+
+    if not os.path.exists(CACHE_BACKUP_PATH):
+        write_json(CACHE_BACKUP_PATH, cache)  # 원본 그대로 백업
+    write_json(CACHE_PATH, migrated)
+    return changed, dropped
+
+
+def is_usable_cache(saved, detailed=False):
     """
     메모장의 기록을 그대로 써도 되는지 확인합니다.
     - "경로 없음" 기록 → 써도 돼요
     - 경로 정보(segments)가 있는 기록 → 써도 돼요
     - 예전에 저장해서 경로 정보가 없는 기록 → 다시 물어봐야 해요
+    detailed=True면 (막차 계산용) 탈것 구간마다 "타는 곳 코드(start_id)"까지 있어야 써요.
     """
-    return "error" in saved or "segments" in saved
+    if "error" in saved:
+        return True
+    if "segments" not in saved:
+        return False
+    if detailed:
+        return all("start_id" in seg for seg in saved["segments"] if seg["type"] != "walk")
+    return True
 
 
-def is_cached(start, end):
+def is_cached(start, end, detailed=False):
     """이 구간을 메모장에서 꺼내 쓸 수 있으면 True (= ODsay를 부르지 않아도 됨)"""
     saved = read_json(CACHE_PATH, {}).get(make_cache_key(start, end))
-    return saved is not None and is_usable_cache(saved)
+    return saved is not None and is_usable_cache(saved, detailed)
+
+
+# ─────────────────────────────────────────────
+# ODsay 부르기 (길찾기, 시간표, 버스 노선 모두 여기를 거쳐요 → 하루 한도를 함께 세요)
+# ─────────────────────────────────────────────
+
+def call_odsay(url, params):
+    """
+    ODsay에 요청을 1번 보내고 답장(딕셔너리)을 돌려줍니다.
+    보내기 전에 오늘 한도와 API 키를 확인하고, 호출 기록부에 1번 적어요.
+    문제가 생기면 한국어 설명이 담긴 ValueError를 일으킵니다.
+    """
+    # 오늘 한도를 다 썼으면 ODsay를 부르지 않고 안내합니다.
+    if get_today_usage() >= DAILY_LIMIT:
+        raise ValueError(f"오늘 대중교통 조회 한도를 다 썼어요. ({DAILY_LIMIT}건) 내일 다시 시도해주세요.")
+
+    # API 키가 없으면 더 진행할 수 없으므로 알려줍니다.
+    if not ODSAY_API_KEY:
+        raise ValueError(".env 파일에 ODSAY_API_KEY가 없습니다. 키를 먼저 넣어주세요.")
+
+    # 보내기 직전에 기록부에 1번 적습니다.
+    # (보낸 뒤 오류가 나더라도 ODsay 쪽에서는 횟수가 줄었을 수 있으니, 넉넉하게 셉니다.)
+    add_one_usage()
+
+    # ODsay 서버에 요청을 보냅니다. 인터넷 문제가 생기면 친절한 메시지로 바꿔줍니다.
+    try:
+        response = requests.get(url, params={**params, "apiKey": ODSAY_API_KEY}, timeout=10)
+        return response.json()  # 답장(JSON)을 파이썬 딕셔너리로 바꾸기
+    except requests.RequestException:
+        raise ValueError("ODsay 서버에 연결하지 못했어요. 인터넷 연결을 확인해주세요.")
+    except ValueError:
+        # 답장이 JSON 형식이 아닐 때 (서버 점검 등)
+        raise ValueError("ODsay 서버가 이상한 답장을 보냈어요. 잠시 후 다시 시도해주세요.")
 
 
 # ─────────────────────────────────────────────
 # 핵심 함수
 # ─────────────────────────────────────────────
 
-def get_transit_info(start, end, offline=False):
+def get_transit_info(start, end, offline=False, detailed=False):
     """
     출발 좌표와 도착 좌표를 받아서, 가장 빠른 대중교통 경로의 정보를 돌려줍니다.
 
     start, end: (위도, 경도) 형태의 좌표. get_coordinates()가 돌려주는 모양과 같아요.
     offline: True면 "테스트 모드"예요. 메모장만 보고, 없으면 ODsay를 부르지 않고 OfflineMissError를 일으켜요.
+    detailed: True면 (막차 계산용) 타는 곳 코드까지 저장된 기록만 써요. 예전 기록이면 다시 물어봐요.
 
     돌려주는 값 예시:
         {"time_min": 40, "transfers": 1, "fare": 1850,
@@ -155,7 +231,7 @@ def get_transit_info(start, end, offline=False):
 
     # 1) 메모장에 쓸 수 있는 기록이 있으면 ODsay를 부르지 않고 바로 돌려줍니다.
     #    (경로 정보가 없는 예전 기록이면 아래로 내려가서 다시 물어봐요)
-    if key in cache and is_usable_cache(cache[key]):
+    if key in cache and is_usable_cache(cache[key], detailed):
         saved = cache[key]
         if "error" in saved:  # "경로 없음"이 적혀 있던 구간
             raise NoRouteError(saved["error"])
@@ -165,43 +241,18 @@ def get_transit_info(start, end, offline=False):
     if offline:
         raise OfflineMissError(OFFLINE_MISS_MESSAGE)
 
-    # 2) 오늘 한도를 다 썼으면 ODsay를 부르지 않고 안내합니다.
-    if get_today_usage() >= DAILY_LIMIT:
-        raise ValueError(f"오늘 대중교통 조회 한도를 다 썼어요. ({DAILY_LIMIT}건) 내일 다시 시도해주세요.")
-
-    # API 키가 없으면 더 진행할 수 없으므로 알려줍니다.
-    if not ODSAY_API_KEY:
-        raise ValueError(".env 파일에 ODSAY_API_KEY가 없습니다. 키를 먼저 넣어주세요.")
-
     start_lat, start_lng = start  # 출발지 위도, 경도 꺼내기
     end_lat, end_lng = end  # 도착지 위도, 경도 꺼내기
 
     # ODsay에는 반올림하지 않은 정확한 좌표를 보내요. (그래야 집에서 역까지 걷는 시간이 정확해요)
     # 메모장에 적을 때만 위의 make_cache_key가 대략적인 위치로 바꿔줘요.
     # ODsay는 X = 경도, Y = 위도로 받습니다. (순서 주의!)
-    params = {
-        "SX": start_lng,
-        "SY": start_lat,
-        "EX": end_lng,
-        "EY": end_lat,
-        "apiKey": ODSAY_API_KEY,
-    }
+    params = {"SX": start_lng, "SY": start_lat, "EX": end_lng, "EY": end_lat}
 
-    # 3) 보내기 직전에 기록부에 1번 적습니다.
-    #    (보낸 뒤 오류가 나더라도 ODsay 쪽에서는 횟수가 줄었을 수 있으니, 넉넉하게 셉니다.)
-    add_one_usage()
+    # 2) ODsay에 물어봅니다. (한도·키 확인과 호출 기록은 call_odsay가 해줘요)
+    data = call_odsay(ODSAY_PATH_URL, params)
 
-    # ODsay 서버에 요청을 보냅니다. 인터넷 문제가 생기면 친절한 메시지로 바꿔줍니다.
-    try:
-        response = requests.get(ODSAY_PATH_URL, params=params, timeout=10)
-        data = response.json()  # 답장(JSON)을 파이썬 딕셔너리로 바꾸기
-    except requests.RequestException:
-        raise ValueError("ODsay 서버에 연결하지 못했어요. 인터넷 연결을 확인해주세요.")
-    except ValueError:
-        # 답장이 JSON 형식이 아닐 때 (서버 점검 등)
-        raise ValueError("ODsay 서버가 이상한 답장을 보냈어요. 잠시 후 다시 시도해주세요.")
-
-    # 4) 결과를 메모장에 적어둡니다. ("경로 없음"도 적어둬요. 키 오류 등은 적지 않아요.)
+    # 3) 결과를 메모장에 적어둡니다. ("경로 없음"도 적어둬요. 키 오류 등은 적지 않아요.)
     try:
         result = parse_transit_response(data)
     except NoRouteError as error:
@@ -277,14 +328,25 @@ def parse_segments(sub_paths):
             line = "/".join(lane["busNo"] for lane in lanes[:3]) + "번" if lanes else "버스"
             seg_type = "bus"
 
-        segments.append({
+        segment = {
             "type": seg_type,
             "line": line,  # 호선 또는 버스 번호
             "start": sub.get("startName", ""),  # 타는 역(정류장)
             "end": sub.get("endName", ""),  # 내리는 역(정류장)
             "minutes": minutes,
             "stations": sub.get("stationCount", 0),  # 몇 정거장 가는지
-        })
+            # ↓ 막차 계산에 쓰는 값들 (ODsay 시간표·버스 노선 API에 그대로 넣어요)
+            "start_id": sub.get("startID"),  # 타는 역(정류장) 코드
+            "end_id": sub.get("endID"),  # 내리는 역(정류장) 코드
+        }
+        if kind == 1:
+            segment["way_code"] = sub.get("wayCode")  # 방향: 1 = 상행, 2 = 하행
+            # 지나가는 역 이름들 (타는 역 ~ 내리는 역). 막차의 종착역이 내릴 역까지 가는지 확인할 때 써요.
+            stops = sub.get("passStopList", {}).get("stations", [])
+            segment["stops"] = [stop["stationName"] for stop in stops]
+        else:
+            segment["bus_ids"] = [lane.get("busID") for lane in lanes]  # 버스 노선 코드들
+        segments.append(segment)
     return segments
 
 

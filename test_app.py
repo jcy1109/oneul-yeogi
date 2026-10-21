@@ -17,7 +17,9 @@ from unittest import mock  # 진짜 함수를 가짜로 바꿔치기하는 도�
 import streamlit as st  # 검색 결과 기억(cache)을 비우기 위한 도구
 from streamlit.testing.v1 import AppTest  # Streamlit 화면 자동 테스트 도구
 
+import last_train
 import transit
+from test_last_train import load
 
 
 def place(name, address, lat, lng):
@@ -37,6 +39,7 @@ FAKE_PLACES = {
     "홍대입구역": [place("홍대입구역", "서울 마포구 양화로 160", 37.55720, 126.92450)],
     "잠실역": [place("잠실역", "서울 송파구 올림픽로 265", 37.51330, 127.10010)],
     "롯데월드": LOTTE_WORLD,
+    "스타필드시티 위례": [place("스타필드시티 위례", "경기 하남시 위례대로 200", 37.48013, 127.14813)],
     "<b>해킹</b>": [place("<b>해킹</b>", "", 37.5, 127.0)],
 }
 
@@ -86,9 +89,19 @@ def open_app():
     return at.run()
 
 
+def origins(at):
+    """친구별 출발지 입력칸들 (막차 목표 지점 칸은 빼고)"""
+    return [box for box in at.text_input if box.key.startswith("place_")]
+
+
+def goals(at):
+    """친구별 '막차로 꼭 도착해야 하는 곳' 입력칸들"""
+    return [box for box in at.text_input if box.key.startswith("goal_")]
+
+
 def type_places(at, names):
     """입력칸에 출발지들을 차례로 적고 화면을 다시 그립니다."""
-    for box, name in zip(at.text_input, names):
+    for box, name in zip(origins(at), names):
         box.input(name)
     return at.run()
 
@@ -122,9 +135,11 @@ def test_first_screen():
     text = all_text(at)
     assert "🚇 오늘은여기서" in text
     assert "친구들 모두에게 공정한 약속 장소 찾기" in text
-    assert len(at.text_input) == 2
+    assert len(origins(at)) == 2
     assert len(remove_buttons(at)) == 0  # 2명일 땐 ✕ 숨김
-    assert at.text_input[0].placeholder == "주소, 아파트 이름, 역 이름 모두 가능해요"
+    assert origins(at)[0].placeholder == "주소, 아파트 이름, 역 이름 모두 가능해요"
+    # 친구마다 "막차로 꼭 도착해야 하는 곳" 칸도 있어요 (선택)
+    assert [box.label for box in goals(at)] == ["🌙 막차로 꼭 도착해야 하는 곳 (선택)"] * 2
     assert at.radio(key="criterion").value == "fair"
     assert at.radio(key="criterion").options == ["⚖️ 공평하게", "⚡ 빠르게"]  # 기준은 2개
     assert at.radio(key="day_type").options == ["평일", "토요일", "일요일·공휴일"]  # 약속 날짜 종류
@@ -143,7 +158,7 @@ def test_add_friend_max_3():
     """'+ 친구 추가'로 3칸까지만 늘어나고, 3칸이 되면 추가 버튼이 꺼지고 ✕가 생겨야 해요."""
     at = open_app()
     at = click(at, "+ 친구 추가")
-    assert len(at.text_input) == 3
+    assert len(origins(at)) == 3
     assert len(remove_buttons(at)) == 3
     add_button = next(b for b in at.button if b.label == "+ 친구 추가")
     assert add_button.disabled
@@ -153,15 +168,15 @@ def test_remove_middle_friend():
     """가운데 친구를 지워도, 남은 친구들의 입력값이 밀리거나 섞이지 않아야 해요."""
     at = open_app()
     at = click(at, "+ 친구 추가")
-    at.text_input[0].input("강남역")
-    at.text_input[1].input("홍대입구역")
-    at.text_input[2].input("수원역")
+    origins(at)[0].input("강남역")
+    origins(at)[1].input("홍대입구역")
+    origins(at)[2].input("수원역")
     at = at.run()
 
     at = remove_buttons(at)[1].click().run()  # 두 번째 친구(홍대입구역)의 ✕
 
-    assert [t.value for t in at.text_input] == ["강남역", "수원역"]
-    assert [t.label for t in at.text_input] == ["친구 1 출발지", "친구 2 출발지"]  # 번호는 다시 1, 2
+    assert [t.value for t in origins(at)] == ["강남역", "수원역"]
+    assert [t.label for t in origins(at)] == ["친구 1 출발지", "친구 2 출발지"]  # 번호는 다시 1, 2
     assert len(remove_buttons(at)) == 0  # 2명이 되면 ✕ 숨김
 
 
@@ -169,19 +184,19 @@ def test_remove_then_add():
     """지운 뒤 다시 추가하면, 새 칸은 빈칸이어야 해요. (지운 친구의 글자가 되살아나면 안 돼요)"""
     at = open_app()
     at = click(at, "+ 친구 추가")
-    at.text_input[2].input("잠실역")
+    origins(at)[2].input("잠실역")
     at = at.run()
     at = remove_buttons(at)[2].click().run()  # 세 번째 친구 삭제
     at = click(at, "+ 친구 추가")  # 다시 추가
 
-    assert len(at.text_input) == 3
-    assert at.text_input[2].value == ""
+    assert len(origins(at)) == 3
+    assert origins(at)[2].value == ""
 
 
 def test_empty_input():
     """빈 칸이 있으면 친절하게 안내해야 해요."""
     at = open_app()
-    at.text_input[0].input("강남역")
+    origins(at)[0].input("강남역")
     at = click(at, "약속 장소 추천받기")
     assert "비어 있는 출발지 칸이 있어요" in all_text(at)
     assert not at.exception
@@ -405,11 +420,11 @@ def test_load_saved_example():
     with mock.patch("recommend.estimate_calls", fake_estimate):
         at = open_app()
         at = click(at, "+ 친구 추가")  # 3칸이었다가
-        at.text_input[0].input("잠실역")
+        origins(at)[0].input("잠실역")
         at = click(at.run(), "저장된 예시 불러오기")
 
     assert not at.exception, at.exception
-    assert [t.value for t in at.text_input] == ["강남역", "수원역"]  # 예시 2명으로 바뀜
+    assert [t.value for t in origins(at)] == ["강남역", "수원역"]  # 예시 2명으로 바뀜
     assert "예시를 불러왔어요: 강남역 + 수원역" in "\n".join(str(s.value) for s in at.success)
 
 
@@ -417,12 +432,107 @@ def test_load_saved_example_none():
     """저장된 예시가 하나도 없으면, 입력칸은 그대로 두고 안내만 해야 해요."""
     with mock.patch("recommend.estimate_calls", lambda coords: (5, [])):
         at = open_app()
-        at.text_input[0].input("잠실역")
+        origins(at)[0].input("잠실역")
         at = click(at.run(), "저장된 예시 불러오기")
 
     assert not at.exception, at.exception
-    assert at.text_input[0].value == "잠실역"
+    assert origins(at)[0].value == "잠실역"
     assert "저장된 예시가 없어요" in "\n".join(str(w.value) for w in at.warning)
+
+
+# ── 귀갓길 막차 ──
+JEONGJA = (37.3661737923199, 127.108097457244)  # 1위 역(정자) 좌표
+SUWON = (37.26579, 127.00009)  # 가짜 검색 결과의 수원역 좌표
+GANGNAM = (37.49809, 127.028)  # 가짜 검색 결과의 강남역 좌표
+
+# 1위가 정자인 가짜 이동시간 표 (막차 계산에는 역 좌표가 필요해요)
+JEONGJA_TABLE = {"friends": ["스타필드시티 위례", "수원역"], "stations": [
+    {"name": "정자", "lat": JEONGJA[0], "lng": JEONGJA[1],
+     "routes": [simple_route(39, "수인분당선", "복정", "정자"), simple_route(41, "수인분당선", "수원", "정자")]},
+]}
+
+
+def seeded_last_train_files():
+    """
+    막차 계산에 필요한 메모장을 임시 폴더에 만들어요. (메모장 경로, 시간표 메모장 경로, 기록부 경로)
+      - 정자 → 수원: 실제 길찾기 답장 + 실제 정자역 시간표 (평일 23:38 고색행)
+      - 정자 → 강남역: 실제 740번 버스 구간으로 만든 가짜 경로 (약 24:04)
+    """
+    folder = tempfile.mkdtemp()
+    paths = [os.path.join(folder, name) for name in ("cache.json", "timetable.json", "usage.json")]
+    transit.write_json(paths[2], {"date": transit.today_kst(), "count": 0})
+    bus_path = load("path_gangnam_to_hongdae_bus_only.json")["result"]["path"][0]["subPath"]
+    transit.write_json(paths[0], {
+        transit.make_cache_key(JEONGJA, SUWON): transit.parse_transit_response(load("path_jeongja_to_suwon.json")),
+        transit.make_cache_key(JEONGJA, GANGNAM): {"time_min": 60, "transfers": 0,
+                                                   "segments": transit.parse_segments(bus_path)},
+    })
+    with mock.patch("last_train.TIMETABLE_CACHE_PATH", paths[1]):
+        last_train.save_timetable("subway", 1530, load("subway_schedule_1530_jeongja_suinbundang.json"))
+        last_train.save_timetable("bus", 1273, load("bus_lane_1273_bus740.json"))
+    return paths
+
+
+def test_last_train_flow():
+    """막차 확인하기 → 모임 종료 시각과 친구별 막차, 날짜 종류를 바꾸면 메모장으로 다시 계산 (ODsay 0건)"""
+    cache, timetable, usage = seeded_last_train_files()
+    with mock.patch("transit.CACHE_PATH", cache), mock.patch("transit.USAGE_PATH", usage), \
+            mock.patch("last_train.TIMETABLE_CACHE_PATH", timetable), \
+            mock.patch("recommend.build_travel_table", mock.Mock(return_value=JEONGJA_TABLE)):
+        at = type_places(open_app(), ["스타필드시티 위례", "수원역"])
+        goals(at)[0].input("강남역")  # 위례 친구는 강남역까지만 가면 돼요 / 수원역 친구는 빈칸 → 출발지까지
+        at = click(at.run(), "약속 장소 추천받기")
+        text = all_text(at)
+        assert "🌙 귀갓길 막차 · 정자역에서" in text
+        assert "🧪 테스트 모드: 저장된 경로와 시간표만 써요. (ODsay 0건)" in text
+        assert "이 모임은" not in all_success(at)  # 누르기 전에는 계산하지 않아요
+
+        at = click(at, "🌙 막차 확인하기")
+        assert not at.exception, at.exception
+        text = all_text(at)
+        # 수원역 친구: 23:38 열차 - 도보 1분 = 23:37 / 위례 친구: 버스 약 24:04 - 도보 2분 = 24:02
+        # → 가장 이른 23:37 - 여유 10분 = 23:27
+        summary = next(box for box in at.success if "이 모임은" in box.value)
+        assert (summary.value, summary.icon) == ("이 모임은 23:27까지 놀 수 있어요 (수원역 친구 기준)", "🌙")
+        assert "- 🏠 **수원역** 친구 → 출발지: 늦어도 **23:37**에 정자역에서 출발 (타는 곳까지 도보 1분)" in text
+        assert "    - 🚇 수인.분당선 정자역 **23:38** 열차 (고색행)" in text
+        assert "- 🏠 **스타필드시티 위례** 친구 → 강남역: 늦어도 **00:02**에 정자역에서 출발" in text
+        assert "    - 🚌 740번 강남역9번출구 **약 00:04 (추정)**" in text
+        assert "📅 평일 시간표 기준" in text
+        assert "경로는 평소 기준이라 밤늦게는 다를 수 있어요" in text
+
+        # 토요일로 바꾸면 버튼을 다시 누르지 않아도 토요일 시간표로 다시 계산해요 (수원 23:27 열차)
+        at = at.radio(key="day_type").set_value("saturday").run()
+        assert not at.exception, at.exception
+        assert "이 모임은 23:16까지 놀 수 있어요 (수원역 친구 기준)" in all_success(at)
+        assert "📅 토요일 시간표 기준" in all_text(at)
+
+        # 목표 지점을 바꾸면 옛 결과는 숨기고 다시 누르라고 안내해요
+        goals(at)[0].input("")
+        at = at.run()
+        assert "장소나 귀가 목표 지점이 바뀌었어요" in all_text(at)
+        assert "이 모임은" not in all_success(at)
+
+    assert transit.read_json(usage, {})["count"] == 0  # ODsay 0건
+
+
+def test_last_train_call_count_and_bad_goal():
+    """테스트 모드를 끄면 누르기 전에 필요한 ODsay 건수를 보여주고, 못 찾은 목표 지점이 있으면 안내해야 해요."""
+    fake_cache, fake_usage = empty_cache_files()
+    timetable = os.path.join(os.path.dirname(fake_cache), "timetable.json")
+    with mock.patch("transit.CACHE_PATH", fake_cache), mock.patch("transit.USAGE_PATH", fake_usage), \
+            mock.patch("last_train.TIMETABLE_CACHE_PATH", timetable), \
+            mock.patch("recommend.build_travel_table", mock.Mock(return_value=JEONGJA_TABLE)):
+        at = open_app()
+        at = at.toggle(key="test_mode").set_value(False).run()
+        at = click(type_places(at, ["스타필드시티 위례", "수원역"]), "약속 장소 추천받기")
+        # 귀갓길이 저장되지 않은 친구 2명 → (경로 1 + 시간표 최대 2) × 2 = 최대 6건
+        assert "ODsay 최대 6건이 필요해요 (오늘 남은 횟수 30건)" in all_text(at)
+
+        goals(at)[1].input("ㅁㄴㅇㄹ존재하지않는곳")
+        at = at.run()
+        assert "찾지 못한 '막차로 꼭 도착해야 하는 곳'이 있어요" in all_text(at)
+        assert not any(b.label == "🌙 막차 확인하기" for b in at.button)
 
 
 # 이 파일을 직접 실행하면 위의 테스트들을 차례로 실행합니다.
@@ -434,7 +544,8 @@ if __name__ == "__main__":
         test_empty_input, test_result_cards_and_switch_criterion, test_travel_bars, test_same_winner_message,
         test_friend_name_is_escaped, test_choose_among_results, test_departure_times, test_kakao_map_link,
         test_place_not_found, test_daily_limit_reached, test_test_mode_without_saved_result,
-        test_load_saved_example, test_load_saved_example_none,
+        test_load_saved_example, test_load_saved_example_none, test_last_train_flow,
+        test_last_train_call_count_and_bad_goal,
     ]
     # 모든 테스트 동안 출발지 검색은 가짜로 바꾸고, 인터넷 요청(카카오·ODsay)은 막아둡니다.
     with mock.patch("geocode.search_places", fake_search), mock.patch("requests.get", internet_forbidden):

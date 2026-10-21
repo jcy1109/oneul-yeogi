@@ -12,12 +12,15 @@ import requests  # 카카오 서버 연결 오류를 알아보기 위한 도구
 import streamlit as st  # 파이썬 코드를 웹 화면으로 바꿔주는 도구
 
 import geocode  # 출발지 검색(주소 → 키워드 순서) 도구
+from last_train import (
+    MANY_RIDES_MESSAGE, clock_text, count_last_train_calls, leg_text, meeting_end, plan_last_trains,
+)
 from recommend import (
     CRITERIA, DAY_TYPES, DEFAULT_CRITERION, DEFAULT_DAY_TYPE, build_travel_table,
     departure_text, find_saved_example, rank_stations, route_details, route_summary, same_top_station,
 )
 from stations import make_search_word  # "사당" → "사당역"
-from transit import DAILY_LIMIT, get_today_usage
+from transit import DAILY_LIMIT, get_remaining_calls, get_today_usage
 
 # 친구는 최소 2명, 최대 3명까지 (ODsay 하루 30건 제한 때문)
 MAX_FRIENDS = 3
@@ -25,6 +28,16 @@ MIN_FRIENDS = 2
 
 # 출발지 입력칸 안내 문구
 PLACE_HINT = "주소, 아파트 이름, 역 이름 모두 가능해요"
+
+# 친구별 "귀가 목표 지점" 입력칸 (비워두면 출발지까지로 계산해요)
+GOAL_LABEL = "🌙 막차로 꼭 도착해야 하는 곳 (선택)"
+GOAL_HINT = "예: 수원역까지만 가면 택시 탈 수 있어요 · 비워두면 출발지까지"
+
+# 막차 결과 아래에 작게 보여줄 안내
+LAST_TRAIN_NOTE = (
+    "경로는 평소 기준이라 밤늦게는 다를 수 있어요. "
+    "버스는 노선 막차와 거리로 추정한 시각이에요(날짜 구분 없음)."
+)
 
 # 사이드바의 테스트 모드 스위치 이름
 TEST_MODE_LABEL = "🧪 테스트 모드 (ODsay 호출 안 함)"
@@ -97,6 +110,7 @@ def load_saved_example():
     # 기존 입력칸은 지우고, 새 번호표로 예시 수만큼 입력칸을 만들어 채워요.
     for friend_id in st.session_state.friend_ids:
         st.session_state.pop(f"place_{friend_id}", None)
+        st.session_state.pop(f"goal_{friend_id}", None)
     start = st.session_state.next_friend_id
     st.session_state.friend_ids = list(range(start, start + len(group)))
     st.session_state.next_friend_id = start + len(group)
@@ -117,6 +131,7 @@ def remove_friend(friend_id):
     if len(st.session_state.friend_ids) > MIN_FRIENDS:
         st.session_state.friend_ids.remove(friend_id)
         st.session_state.pop(f"place_{friend_id}", None)  # 지운 칸에 적혀 있던 글자도 정리
+        st.session_state.pop(f"goal_{friend_id}", None)
 
 
 @st.cache_data(show_spinner=False, max_entries=100)
@@ -129,11 +144,12 @@ def search_places(query):
     return geocode.search_places(query)
 
 
-def choose_place(text, friend_id):
+def choose_place(text, pick_key):
     """
-    입력한 출발지를 검색해서 사용자가 위치를 확인(또는 선택)하게 하고,
+    입력한 장소를 검색해서 사용자가 위치를 확인(또는 선택)하게 하고,
     고른 장소 {"name", "address", "lat", "lng"}를 돌려줍니다.
     빈칸이거나 찾지 못했으면 None을 돌려줘요.
+    pick_key: 선택 버튼 이름에 쓰는 글자 (출발지는 친구 번호표, 귀가 목표 지점은 "goal_번호표")
     """
     if text == "":
         return None
@@ -158,7 +174,7 @@ def choose_place(text, friend_id):
             "어느 곳인가요?",
             options=range(len(results)),
             format_func=lambda i: geocode.place_text(results[i]),  # 예: "롯데월드 (서울 송파구 ...)"
-            key=f"pick_{friend_id}_{text}",
+            key=f"pick_{pick_key}_{text}",
         )
         chosen = results[index]
 
@@ -236,6 +252,100 @@ def show_station_card(rank, station, friends, scale_max, meeting_time):
                 st.markdown("\n".join(f"- {line}" for line in route_details(route)))
 
 
+def last_train_lines(friend, goal_name, result, station_name):
+    """친구 한 명의 막차 결과를 화면용 목록 줄들로 바꿉니다. (구간별 줄은 한 칸 들여써요)"""
+    head = f"- 🏠 **{friend}** 친구 → {goal_name}"
+    status = result["status"]
+    if status == "ok":
+        lines = [f"{head}: 늦어도 **{clock_text(result['leave_by'])}**에 {station_name}역에서 출발 "
+                 f"(타는 곳까지 도보 {result['walk_min']}분)"]
+        lines += [f"    - {leg_text(leg)}" for leg in result["legs"]]
+        return lines
+    if status == "walk":
+        return [f"{head}: 걸어서 {result['minutes']}분 거리라 막차 걱정이 없어요"]
+    if status == "many":
+        return [f"{head}: {MANY_RIDES_MESSAGE}"]
+    if status == "unsure":
+        return [f"{head}: ⚠️ 확인 필요 · {result['reason']}"]
+    return [f"{head}: 귀갓길을 찾지 못했어요 ({result['reason']})"]  # status == "error"
+
+
+def show_last_trains(top, friends, places, goal_texts, goal_places, day_type, meeting_time, test_mode):
+    """
+    1위 역에서 친구마다 귀가 목표 지점까지의 막차를 확인하는 부분입니다.
+    '🌙 막차 확인하기' 버튼을 눌렀을 때만 ODsay를 부르고(테스트 모드면 안 불러요),
+    그 뒤로는 날짜 종류를 바꿔도 메모장(캐시)의 시간표로 다시 계산해요.
+    """
+    st.subheader(f"🌙 귀갓길 막차 · {top['name']}역에서")
+
+    if top.get("lat") is None:
+        st.caption("이 역은 좌표가 없어서 막차를 확인할 수 없어요.")
+        return
+    if any(text and place is None for text, place in zip(goal_texts, goal_places)):
+        st.warning("찾지 못한 '막차로 꼭 도착해야 하는 곳'이 있어요. 입력칸 아래 안내를 확인해주세요.")
+        return
+
+    station_coord = (top["lat"], top["lng"])
+    # 목표 지점을 비워둔 친구는 출발지(집)까지로 계산해요
+    goals = [(goal["lat"], goal["lng"]) if goal else (lat, lng)
+             for goal, (name, lat, lng) in zip(goal_places, places)]
+    goal_names = [goal["name"] if goal else "출발지" for goal in goal_places]
+    # 어떤 조건으로 계산한 결과인지 (역·출발지·목표 지점이 바뀌면 옛 결과를 숨겨요)
+    condition = (top["name"], tuple(places), tuple(goals))
+
+    # 누르기 전에 필요한 ODsay 호출 수를 알려줘요
+    needed, exact = count_last_train_calls(station_coord, goals)
+    if test_mode:
+        st.caption("🧪 테스트 모드: 저장된 경로와 시간표만 써요. (ODsay 0건)")
+    elif needed == 0:
+        st.caption("저장된 경로와 시간표로 바로 확인할 수 있어요. (ODsay 0건)")
+    else:
+        amount = f"{needed}건" if exact else f"최대 {needed}건"
+        st.caption(f"ODsay {amount}이 필요해요 (오늘 남은 횟수 {get_remaining_calls()}건)")
+
+    if st.button("🌙 막차 확인하기"):
+        try:
+            with st.spinner("막차 확인 중..."):
+                plan_last_trains(station_coord, goals, day_type, offline=test_mode)
+            st.session_state.last_train_for = condition
+        except ValueError as error:
+            # 한도 부족, 테스트 모드에서 저장된 결과 없음, 키 오류 등 → 멈추지 않고 안내만
+            st.error(str(error))
+            st.session_state.last_train_for = None
+            return
+
+    if st.session_state.get("last_train_for") != condition:
+        if st.session_state.get("last_train_for") is not None:
+            st.info("장소나 귀가 목표 지점이 바뀌었어요. '🌙 막차 확인하기'를 다시 눌러주세요.")
+        return
+
+    # 버튼으로 받아둔 메모장만 써서 다시 계산해요 (날짜 종류를 바꿔도 ODsay 0건)
+    try:
+        results = plan_last_trains(station_coord, goals, day_type, offline=True)
+    except ValueError:
+        st.info("저장된 시간표가 부족해요. '🌙 막차 확인하기'를 다시 눌러주세요.")
+        return
+
+    st.caption(f"📅 {DAY_TYPES[day_type]} 시간표 기준")
+    end = meeting_end(results, friends)
+    if end:
+        st.success(f"이 모임은 {clock_text(end['end'])}까지 놀 수 있어요 ({end['friend']} 친구 기준)", icon="🌙")
+        meeting_minutes = meeting_time.hour * 60 + meeting_time.minute
+        if end["end"] <= meeting_minutes:
+            st.warning(f"막차 때문에 약속 시각({meeting_time:%H:%M})보다 일찍 헤어져야 해요. 다른 장소도 고려해보세요.")
+
+    lines = []
+    for friend, goal_name, result in zip(friends, goal_names, results):
+        lines += last_train_lines(friend, goal_name, result, top["name"])
+    st.markdown("\n".join(lines))
+
+    # 막차를 확실하게 계산하지 못한 친구는 모임 종료 시각에서 빠졌다고 알려줘요
+    left_out = [f for f, r in zip(friends, results) if r["status"] in ("unsure", "many", "error")]
+    if end and left_out:
+        st.warning(f"{', '.join(left_out)} 친구는 확인이 필요해서 모임 종료 시각 계산에서 빠졌어요.", icon="⚠️")
+    st.caption(LAST_TRAIN_NOTE)
+
+
 # ─────────────────────────────────────────────
 # 0. 사이드바: 테스트 모드 (영상 녹화·연습용)
 # ─────────────────────────────────────────────
@@ -269,6 +379,8 @@ st.subheader("👥 친구들의 출발지")
 can_remove = len(st.session_state.friend_ids) > MIN_FRIENDS
 texts = []  # 입력칸에 적은 글자들
 chosen_places = []  # 검색해서 고른 장소들 (못 찾았으면 None)
+goal_texts = []  # 귀가 목표 지점 칸에 적은 글자들 (빈칸 = 출발지까지)
+goal_places = []  # 검색해서 고른 귀가 목표 지점들 (빈칸이거나 못 찾았으면 None)
 
 for position, friend_id in enumerate(st.session_state.friend_ids):
     label = f"친구 {position + 1} 출발지"
@@ -288,6 +400,11 @@ for position, friend_id in enumerate(st.session_state.friend_ids):
     text = text.strip()  # 앞뒤 공백은 지워요
     texts.append(text)
     chosen_places.append(choose_place(text, friend_id))
+
+    # 귀가 목표 지점 (선택). 비워두면 None → 출발지까지로 계산해요.
+    goal_text = st.text_input(GOAL_LABEL, key=f"goal_{friend_id}", placeholder=GOAL_HINT).strip()
+    goal_texts.append(goal_text)
+    goal_places.append(choose_place(goal_text, f"goal_{friend_id}") if goal_text else None)
 
 # 결과 화면에 보여줄 친구별 출발지 이름과, 이동시간 계산에 쓸 좌표
 # (출발지가 바뀌었는지 확인할 때도 이 목록을 비교해요. 빈칸·못 찾은 칸은 None으로 남겨서
@@ -315,7 +432,7 @@ criterion = st.radio(
 )
 
 # ─────────────────────────────────────────────
-# 3-1. 약속 시각 (날짜 종류는 다음 단계의 막차 시간표에서 써요)
+# 3-1. 약속 시각 (날짜 종류는 귀갓길 막차 시간표에서도 써요)
 # ─────────────────────────────────────────────
 st.subheader("🕖 약속 시각")
 day_type = st.radio(
@@ -403,6 +520,10 @@ if table is not None:
 
         if not ranked:
             st.error("모든 후보역의 경로를 구하지 못했어요. 다른 출발지로 시도해주세요.")
+        else:
+            # 1위 역에서 친구들이 집(또는 귀가 목표 지점)으로 가는 막차
+            show_last_trains(ranked[0], table["friends"], places, goal_texts, goal_places,
+                             day_type, meeting_time, test_mode)
 
 # ─────────────────────────────────────────────
 # 6. 오늘 ODsay 사용량 (항상 맨 아래에)

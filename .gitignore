@@ -11,3 +11,5 @@ venv/
 # ODsay 결과 메모장(캐시)과 오늘 호출 횟수 기록부 - 내 컴퓨터에서만 쓰는 기록
 data/transit_cache.json
 data/odsay_usage.json
+data/transit_cache.backup.json
+data/timetable_cache.json
