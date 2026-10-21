@@ -31,6 +31,17 @@ USAGE_PATH = os.path.join("data", "odsay_usage.json")
 KST = timezone(timedelta(hours=9))
 
 
+# 테스트 모드에서 메모장에 없는 구간을 만났을 때 보여줄 안내
+OFFLINE_MISS_MESSAGE = "테스트 모드에서는 저장된 결과가 없어요."
+
+
+class OfflineMissError(ValueError):
+    """
+    테스트 모드(ODsay 호출 안 함)인데 메모장에 기록이 없을 때 생기는 오류입니다.
+    (ValueError의 한 종류라서, 화면에서는 다른 오류처럼 안내만 하고 멈추지 않아요.)
+    """
+
+
 class NoRouteError(ValueError):
     """
     "경로 없음" 또는 "너무 가까움"처럼, 다시 물어봐도 결과가 똑같은 오류입니다.
@@ -124,11 +135,12 @@ def is_cached(start, end):
 # 핵심 함수
 # ─────────────────────────────────────────────
 
-def get_transit_info(start, end):
+def get_transit_info(start, end, offline=False):
     """
     출발 좌표와 도착 좌표를 받아서, 가장 빠른 대중교통 경로의 정보를 돌려줍니다.
 
     start, end: (위도, 경도) 형태의 좌표. get_coordinates()가 돌려주는 모양과 같아요.
+    offline: True면 "테스트 모드"예요. 메모장만 보고, 없으면 ODsay를 부르지 않고 OfflineMissError를 일으켜요.
 
     돌려주는 값 예시:
         {"time_min": 40, "transfers": 1, "fare": 1850,
@@ -148,6 +160,10 @@ def get_transit_info(start, end):
         if "error" in saved:  # "경로 없음"이 적혀 있던 구간
             raise NoRouteError(saved["error"])
         return saved
+
+    # 테스트 모드에서는 메모장에 없으면 여기서 멈춰요. (ODsay를 절대 부르지 않아요)
+    if offline:
+        raise OfflineMissError(OFFLINE_MISS_MESSAGE)
 
     # 2) 오늘 한도를 다 썼으면 ODsay를 부르지 않고 안내합니다.
     if get_today_usage() >= DAILY_LIMIT:

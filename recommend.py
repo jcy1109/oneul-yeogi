@@ -10,7 +10,9 @@ import math  # 올림(ceil) 계산을 위한 도구
 from datetime import date, datetime, timedelta  # 출발 시각(약속 시각 - 이동시간)을 계산하기 위한 도구
 
 from candidates import geocode_places, haversine, pick_nearest_stations
-from transit import DAILY_LIMIT, NoRouteError, get_remaining_calls, get_transit_info, is_cached
+from transit import (
+    DAILY_LIMIT, OFFLINE_MISS_MESSAGE, NoRouteError, get_remaining_calls, get_transit_info, is_cached,
+)
 
 # 공정성 기준: 코드에서 쓰는 이름 → 사용자에게 보여줄 이름
 CRITERIA = {
@@ -41,6 +43,15 @@ BUFFER_MIN = 5
 # 한 번 검색할 때 ODsay를 최대 몇 번까지 부를지 (하루 30건 제한 때문)
 MAX_CALLS_PER_SEARCH = 10
 MAX_CANDIDATES = 5  # 후보역은 아무리 많아도 5곳까지
+
+# "저장된 예시 불러오기"에서 차례로 시도해볼 출발지 조합
+# ⚠️ 누구나 아는 공공장소만 적어요. (실제 개인 주소는 절대 적지 않기!)
+EXAMPLE_GROUPS = [
+    ["스타필드시티 위례", "수원역"],
+    ["강남역", "수원역"],
+    ["롯데월드몰", "수원역"],
+    ["강남역", "스타필드시티 위례"],
+]
 
 
 def candidate_count(friend_count):
@@ -92,7 +103,30 @@ def estimate_calls(coords, top_n=None):
     return count_odsay_calls(coords, stations), [s["name"] for s in stations]
 
 
-def build_travel_table(friends, coords, top_n=None):
+def find_saved_example(search, groups=EXAMPLE_GROUPS):
+    """
+    예시 조합 중에서 "모든 구간이 메모장에 있는" 첫 번째 조합을 돌려줍니다. 없으면 None.
+    (그 조합으로 추천받으면 테스트 모드에서도 ODsay 없이 결과가 나와요)
+
+    search: 장소 이름 → 검색 결과 목록을 돌려주는 함수 (화면의 카카오 검색과 같은 것)
+            화면처럼 검색 결과의 1번째 장소를 고른다고 보고 좌표를 구해요.
+    """
+    for group in groups:
+        coords = []
+        for name in group:
+            results = search(name)
+            if not results:  # 못 찾은 장소가 있으면 이 조합은 건너뛰어요
+                break
+            coords.append((results[0]["lat"], results[0]["lng"]))
+        else:
+            # for 문이 break 없이 끝났다 = 모든 장소를 찾았다
+            needed, _ = estimate_calls(coords)
+            if needed == 0:
+                return list(group)
+    return None
+
+
+def build_travel_table(friends, coords, top_n=None, offline=False):
     """
     [1단계] 친구 × 후보역마다 소요시간과 환승 횟수를 구해서 "이동시간 표"를 만듭니다.
 
@@ -113,14 +147,23 @@ def build_travel_table(friends, coords, top_n=None):
         }
     routes의 순서는 friends의 순서와 같아요. (같은 출발지를 두 명이 입력해도 헷갈리지 않게)
     top_n을 비워두면 친구 수에 맞춰 후보 개수를 정해요. (2명 → 5곳, 3명 → 3곳)
+    offline: True면 "테스트 모드"예요. 메모장(캐시)에 있는 구간만 쓰고 ODsay는 부르지 않아요.
     """
     if top_n is None:
         top_n = candidate_count(len(coords))
     stations = pick_nearest_stations(coords, top_n)  # 후보역 고르기
+    needed = count_odsay_calls(coords, stations)  # ODsay가 필요한 (메모장에 없는) 구간 수
+
+    # 테스트 모드: 메모장에 없는 구간이 하나라도 있으면, 시작하기 전에 안내하고 멈춰요.
+    # (그래서 테스트 모드로 아래까지 내려오면 needed는 항상 0 → 남은 횟수 확인도 그냥 지나가요)
+    if offline and needed > 0:
+        raise ValueError(
+            f"{OFFLINE_MISS_MESSAGE} (저장되지 않은 구간 {needed}개) "
+            "사이드바의 '저장된 예시 불러오기'를 쓰거나, 테스트 모드를 꺼주세요."
+        )
 
     # 시작하기 전에, 오늘 남은 호출 횟수로 충분한지 확인합니다.
     # (중간에 한도가 끝나서 호출만 날리고 결과를 못 얻는 일을 막기 위해서예요)
-    needed = count_odsay_calls(coords, stations)
     remaining = get_remaining_calls()
     if needed > 0 and remaining == 0:
         raise ValueError(f"오늘 대중교통 조회 한도를 다 썼어요. ({DAILY_LIMIT}건) 내일 다시 시도해주세요.")
@@ -144,7 +187,7 @@ def build_travel_table(friends, coords, top_n=None):
                 continue
 
             try:
-                routes.append(get_transit_info(start, station_coord))
+                routes.append(get_transit_info(start, station_coord, offline=offline))
             except NoRouteError as error:
                 # "경로 없음"은 이 역만의 문제 → 기록해두고 나중에 순위에서 뺍니다.
                 routes.append({"error": str(error)})

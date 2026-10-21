@@ -208,9 +208,27 @@ def test_network_error():
     assert "인터넷 연결을 확인" in message, message
 
 
+def test_offline_mode():
+    """테스트 모드: 메모장에 있으면 꺼내 쓰고, 없으면 ODsay를 부르지 않고 '저장된 결과가 없어요' 오류를 내야 해요."""
+    fresh_files()
+    postman = fake_postman(FAKE_OK)
+    with mock.patch("transit.requests.get", postman), mock.patch("transit.ODSAY_API_KEY", "FAKE_KEY"):
+        try:
+            transit.get_transit_info(START, END, offline=True)
+            assert False, "오류가 나야 하는데 안 났어요"
+        except transit.OfflineMissError as error:
+            assert "테스트 모드에서는 저장된 결과가 없어요" in str(error)
+        assert postman.call_count == 0  # ODsay를 부르지 않았어요
+        assert transit.get_today_usage() == 0  # 기록부도 그대로
+
+        transit.get_transit_info(START, END)  # 테스트 모드를 끄고 한 번 물어보면 메모장에 저장돼요
+        assert transit.get_transit_info(START, END, offline=True) == EXPECTED_OK  # 이제는 메모장에서 꺼내요
+        assert postman.call_count == 1
+
+
 # 이 파일을 직접 실행하면 위의 테스트들을 차례로 실행합니다.
 if __name__ == "__main__":
-    tests = [test_cache, test_cache_key_rounds_start, test_same_neighborhood_shares_cache, test_segments_parsed, test_old_cache_without_segments, test_wrong_key, test_too_close, test_daily_limit, test_new_day, test_network_error]
+    tests = [test_cache, test_cache_key_rounds_start, test_same_neighborhood_shares_cache, test_segments_parsed, test_old_cache_without_segments, test_wrong_key, test_too_close, test_daily_limit, test_new_day, test_network_error, test_offline_mode]
     for test in tests:
         test()  # 실패하면 여기서 AssertionError가 나며 멈춰요
         print(f"✅ {test.__name__}: {test.__doc__.strip().splitlines()[0]}")

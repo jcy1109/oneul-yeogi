@@ -132,6 +132,11 @@ def test_first_screen():
     assert at.time_input(key="meeting_time").value == time(19, 0)  # 처음엔 저녁 7시
     assert len(at.tabs) == 0  # 맛집 기능의 탭은 없어졌어요
     assert f"오늘 ODsay 사용량: {transit.get_today_usage()}/30건" in text
+    # 테스트 모드: 사이드바 스위치는 처음에 켜져 있고, 화면 위쪽에 표시돼요
+    assert at.toggle(key="test_mode").label == "🧪 테스트 모드 (ODsay 호출 안 함)"
+    assert at.toggle(key="test_mode").value is True
+    badge = at.info[0]  # 화면 위쪽의 파란 안내 상자
+    assert badge.value == "테스트 모드 · ODsay를 부르지 않고 저장된 결과만 써요" and badge.icon == "🧪"
 
 
 def test_add_friend_max_3():
@@ -355,13 +360,69 @@ def test_daily_limit_reached():
     transit.write_json(fake_usage, {"date": transit.today_kst(), "count": 30})
 
     with mock.patch("transit.USAGE_PATH", fake_usage), mock.patch("transit.CACHE_PATH", fake_cache):
-        at = type_places(open_app(), ["홍대입구역", "잠실역"])
+        at = open_app()
+        at = at.toggle(key="test_mode").set_value(False).run()  # 테스트 모드를 꺼야 ODsay를 쓰려고 해요
+        at = type_places(at, ["홍대입구역", "잠실역"])
         at = click(at, "약속 장소 추천받기")
         text = all_text(at)
 
     assert not at.exception, at.exception
     assert "오늘 대중교통 조회 한도를 다 썼어요" in text
     assert "오늘 ODsay 사용량: 30/30건" in text
+
+
+def empty_cache_files():
+    """빈 메모장과 오늘 0건인 기록부를 임시 폴더에 만들어 (메모장 경로, 기록부 경로)를 돌려줍니다."""
+    folder = tempfile.mkdtemp()
+    fake_usage = os.path.join(folder, "usage.json")
+    transit.write_json(fake_usage, {"date": transit.today_kst(), "count": 0})
+    return os.path.join(folder, "cache.json"), fake_usage
+
+
+def test_test_mode_without_saved_result():
+    """테스트 모드에서 메모장에 없는 출발지면, ODsay를 부르지 않고 '저장된 결과가 없어요'라고 안내해야 해요."""
+    fake_cache, fake_usage = empty_cache_files()
+    with mock.patch("transit.USAGE_PATH", fake_usage), mock.patch("transit.CACHE_PATH", fake_cache):
+        at = type_places(open_app(), ["홍대입구역", "잠실역"])
+        at = click(at, "약속 장소 추천받기")
+        text = all_text(at)
+
+    assert not at.exception, at.exception
+    assert "테스트 모드에서는 저장된 결과가 없어요" in text
+    assert "저장된 예시 불러오기" in text
+    assert "오늘 ODsay 사용량: 0/30건" in text  # 사용량이 늘지 않았어요
+    assert "🏆" not in text
+
+
+def test_load_saved_example():
+    """'저장된 예시 불러오기'를 누르면, 모든 구간이 메모장에 있는 조합이 입력칸에 채워져야 해요."""
+    gangnam_suwon = [(37.49809, 127.028), (37.26579, 127.00009)]
+
+    def fake_estimate(coords):
+        # 강남역 + 수원역 조합만 "모두 저장됨(0건)", 나머지는 저장 안 됨
+        return (0 if coords == gangnam_suwon else 3), []
+
+    with mock.patch("recommend.estimate_calls", fake_estimate):
+        at = open_app()
+        at = click(at, "+ 친구 추가")  # 3칸이었다가
+        at.text_input[0].input("잠실역")
+        at = click(at.run(), "저장된 예시 불러오기")
+
+    assert not at.exception, at.exception
+    assert [t.value for t in at.text_input] == ["강남역", "수원역"]  # 예시 2명으로 바뀜
+    assert "예시를 불러왔어요: 강남역 + 수원역" in "\n".join(str(s.value) for s in at.success)
+
+
+def test_load_saved_example_none():
+    """저장된 예시가 하나도 없으면, 입력칸은 그대로 두고 안내만 해야 해요."""
+    with mock.patch("recommend.estimate_calls", lambda coords: (5, [])):
+        at = open_app()
+        at.text_input[0].input("잠실역")
+        at = click(at.run(), "저장된 예시 불러오기")
+
+    assert not at.exception, at.exception
+    assert at.text_input[0].value == "잠실역"
+    assert "저장된 예시가 없어요" in "\n".join(str(w.value) for w in at.warning)
 
 
 # 이 파일을 직접 실행하면 위의 테스트들을 차례로 실행합니다.
@@ -372,7 +433,8 @@ if __name__ == "__main__":
         test_first_screen, test_add_friend_max_3, test_remove_middle_friend, test_remove_then_add,
         test_empty_input, test_result_cards_and_switch_criterion, test_travel_bars, test_same_winner_message,
         test_friend_name_is_escaped, test_choose_among_results, test_departure_times, test_kakao_map_link,
-        test_place_not_found, test_daily_limit_reached,
+        test_place_not_found, test_daily_limit_reached, test_test_mode_without_saved_result,
+        test_load_saved_example, test_load_saved_example_none,
     ]
     # 모든 테스트 동안 출발지 검색은 가짜로 바꾸고, 인터넷 요청(카카오·ODsay)은 막아둡니다.
     with mock.patch("geocode.search_places", fake_search), mock.patch("requests.get", internet_forbidden):

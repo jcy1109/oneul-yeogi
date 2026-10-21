@@ -14,7 +14,7 @@ import streamlit as st  # 파이썬 코드를 웹 화면으로 바꿔주는 도�
 import geocode  # 출발지 검색(주소 → 키워드 순서) 도구
 from recommend import (
     CRITERIA, DAY_TYPES, DEFAULT_CRITERION, DEFAULT_DAY_TYPE, build_travel_table,
-    departure_text, rank_stations, route_details, route_summary, same_top_station,
+    departure_text, find_saved_example, rank_stations, route_details, route_summary, same_top_station,
 )
 from stations import make_search_word  # "사당" → "사당역"
 from transit import DAILY_LIMIT, get_today_usage
@@ -25,6 +25,9 @@ MIN_FRIENDS = 2
 
 # 출발지 입력칸 안내 문구
 PLACE_HINT = "주소, 아파트 이름, 역 이름 모두 가능해요"
+
+# 사이드바의 테스트 모드 스위치 이름
+TEST_MODE_LABEL = "🧪 테스트 모드 (ODsay 호출 안 함)"
 
 # 약속 시각 입력칸의 처음 값 (저녁 7시)
 DEFAULT_MEETING_TIME = time(19, 0)
@@ -71,6 +74,35 @@ if "friend_ids" not in st.session_state:
 if "table" not in st.session_state:
     st.session_state.table = None  # 이동시간 표 (아직 추천 전이라 비어 있음)
     st.session_state.table_places = []  # 그 표를 만들 때 쓴 출발지들 (이름, 위도, 경도)
+
+
+def load_saved_example():
+    """
+    '저장된 예시 불러오기' 버튼을 누르면, 메모장(캐시)에 모든 구간이 있는 출발지 조합을
+    입력칸에 채워줍니다. (버튼의 on_click으로 실행돼서, 입력칸이 그려지기 전에 값을 넣을 수 있어요)
+    결과 안내는 사물함의 example_message에 넣어두고, 사이드바에서 보여줘요.
+    """
+    try:
+        group = find_saved_example(search_places)
+    except (requests.RequestException, ValueError) as error:
+        st.session_state.example_message = ("error", f"예시를 찾는 중 문제가 생겼어요: {error}")
+        return
+
+    if group is None:
+        st.session_state.example_message = (
+            "warning", "저장된 예시가 없어요. 테스트 모드를 끄고 한 번 추천받으면 저장돼요.",
+        )
+        return
+
+    # 기존 입력칸은 지우고, 새 번호표로 예시 수만큼 입력칸을 만들어 채워요.
+    for friend_id in st.session_state.friend_ids:
+        st.session_state.pop(f"place_{friend_id}", None)
+    start = st.session_state.next_friend_id
+    st.session_state.friend_ids = list(range(start, start + len(group)))
+    st.session_state.next_friend_id = start + len(group)
+    for friend_id, name in zip(st.session_state.friend_ids, group):
+        st.session_state[f"place_{friend_id}"] = name
+    st.session_state.example_message = ("success", f"예시를 불러왔어요: {' + '.join(group)}")
 
 
 def add_friend():
@@ -205,11 +237,29 @@ def show_station_card(rank, station, friends, scale_max, meeting_time):
 
 
 # ─────────────────────────────────────────────
+# 0. 사이드바: 테스트 모드 (영상 녹화·연습용)
+# ─────────────────────────────────────────────
+with st.sidebar:
+    # 켜져 있으면 ODsay를 절대 부르지 않고, 메모장(캐시)에 저장된 결과만 써요. 처음엔 켜져 있어요.
+    test_mode = st.toggle(TEST_MODE_LABEL, value=True, key="test_mode")
+    st.caption("켜져 있으면 저장된 결과만 쓰고 ODsay 사용량이 늘지 않아요.")
+    st.button("저장된 예시 불러오기", on_click=load_saved_example)
+
+    # 예시 불러오기 결과 안내 (한 번 보여주면 사물함에서 꺼내서 지워요)
+    message = st.session_state.pop("example_message", None)
+    if message:
+        kind, text = message
+        {"success": st.success, "warning": st.warning, "error": st.error}[kind](text)
+
+# ─────────────────────────────────────────────
 # 1. 제목과 소개
 # ─────────────────────────────────────────────
 st.markdown(BAR_STYLE, unsafe_allow_html=True)  # 막대 그래프 모양 넣기
 st.title("🚇 오늘은여기서")
 st.write("친구들 모두에게 공정한 약속 장소 찾기")
+if test_mode:
+    # 녹화 화면에서도 테스트 모드인 걸 알 수 있게 위쪽에 표시해요
+    st.info("테스트 모드 · ODsay를 부르지 않고 저장된 결과만 써요", icon="🧪")
 
 # ─────────────────────────────────────────────
 # 2. 친구 출발지 입력칸 (✕ 버튼은 3명일 때만 보여요)
@@ -300,14 +350,15 @@ if st.button("약속 장소 추천받기", type="primary"):
         try:
             # ODsay를 부를 수 있는 곳은 여기 한 군데뿐이에요. (버튼을 눌렀을 때만)
             # 후보역 개수는 친구 수에 맞춰 자동으로 정해져요. (2명 → 5곳, 3명 → 3곳)
+            # 테스트 모드면 메모장(캐시)만 쓰고, 없으면 ODsay 대신 안내만 해요.
             with st.spinner("이동시간 계산 중..."):
                 names = [name for name, lat, lng in places]
                 coords = [(lat, lng) for name, lat, lng in places]
-                table = build_travel_table(names, coords)
+                table = build_travel_table(names, coords, offline=test_mode)
             st.session_state.table = table  # 사물함에 이동시간 표 저장
             st.session_state.table_places = places  # 어떤 출발지로 만든 표인지도 저장
         except ValueError as error:
-            # 없는 장소, 오늘 한도 초과, 키 오류 등 → 멈추지 않고 안내만
+            # 없는 장소, 오늘 한도 초과, 키 오류, 테스트 모드에서 저장된 결과 없음 등 → 멈추지 않고 안내만
             st.error(str(error))
             st.session_state.table = None
             problem_shown = True

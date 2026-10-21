@@ -4,9 +4,12 @@
 # ⚠️ 순위 함수는 ODsay를 부르지 않아요. 여기서는 가짜 표만 쓰기 때문에 호출 0번이에요.
 
 from datetime import time  # 약속 시각(예: 19:00)을 만들기 위한 도구
+from unittest import mock  # 진짜 함수를 가짜로 바꿔치기하는 도구
+
+import recommend
 
 from recommend import (
-    candidate_count, departure_text, departure_time, rank_stations, route_details, route_summary, same_top_station,
+    candidate_count, departure_text, departure_time, find_saved_example, rank_stations, route_details, route_summary, same_top_station,
 )
 
 # 가짜 경로: 강남 → [2호선] → 사당 → [4호선] → 금정 (같은 역에서 환승)
@@ -205,6 +208,33 @@ def test_unknown_criterion():
         assert "알 수 없는 기준" in str(error)
 
 
+def test_find_saved_example():
+    """예시 조합 중 '모든 구간이 메모장에 있는' 첫 조합을 골라야 해요. 못 찾는 장소가 있는 조합은 건너뛰어요."""
+    fake_places = {"A역": [{"lat": 37.1, "lng": 127.1}], "B역": [{"lat": 37.2, "lng": 127.2}],
+                   "C역": [{"lat": 37.3, "lng": 127.3}]}
+    search = lambda name: fake_places.get(name, [])  # 가짜 장소 검색 (없는 이름이면 빈 목록)
+    groups = [["없는곳", "A역"], ["A역", "B역"], ["A역", "C역"]]
+
+    def fake_estimate(coords):
+        # A역 + C역만 모두 저장되어 있다고 쳐요 (A역 + B역은 2구간이 저장 안 됨)
+        return (0 if coords == [(37.1, 127.1), (37.3, 127.3)] else 2), []
+
+    with mock.patch("recommend.estimate_calls", fake_estimate):
+        assert find_saved_example(search, groups) == ["A역", "C역"]
+        assert find_saved_example(search, groups[:2]) is None  # 저장된 조합이 없으면 None
+
+
+def test_offline_build_needs_cache():
+    """테스트 모드로 이동시간 표를 만들 때 저장 안 된 구간이 있으면, ODsay 없이 바로 안내해야 해요."""
+    with mock.patch("recommend.count_odsay_calls", lambda coords, stations: 4), \
+            mock.patch("recommend.get_transit_info", side_effect=AssertionError("부르면 안 돼요")):
+        try:
+            recommend.build_travel_table(["친구1", "친구2"], [(37.5, 127.0), (37.3, 127.0)], offline=True)
+            assert False, "오류가 나야 하는데 안 났어요"
+        except ValueError as error:
+            assert "테스트 모드에서는 저장된 결과가 없어요. (저장되지 않은 구간 4개)" in str(error), error
+
+
 # 이 파일을 직접 실행하면 위의 테스트들을 차례로 실행합니다.
 if __name__ == "__main__":
     tests = [
@@ -212,7 +242,7 @@ if __name__ == "__main__":
         test_fast, test_default_is_fair, test_same_top_station, test_excluded_station,
         test_candidate_count, test_route_summary_home_walk, test_route_summary_subway, test_route_summary_bus_to_subway,
         test_route_details, test_route_walk_and_error, test_departure_time, test_departure_text,
-        test_departure_previous_day, test_unknown_criterion,
+        test_departure_previous_day, test_unknown_criterion, test_find_saved_example, test_offline_build_needs_cache,
     ]
     for test in tests:
         test()  # 실패하면 여기서 AssertionError가 나며 멈춰요
