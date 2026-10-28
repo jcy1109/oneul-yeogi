@@ -1,0 +1,511 @@
+{
+  "37.480,127.148->37.366,127.108": {
+    "time_min": 39,
+    "transfers": 1,
+    "fare": 1850,
+    "segments": [
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 87
+      },
+      {
+        "type": "bus",
+        "line": "38번",
+        "start": "스타필드시티.위례스타힐스.하남시위례도서관",
+        "end": "복정역환승센터1번승강장",
+        "minutes": 17,
+        "stations": 7
+      },
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 58
+      },
+      {
+        "type": "subway",
+        "line": "수인.분당선",
+        "start": "복정",
+        "end": "정자",
+        "minutes": 19,
+        "stations": 8
+      },
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 1
+      }
+    ]
+  },
+  "37.266,127.000->37.366,127.108": {
+    "time_min": 41,
+    "transfers": 0,
+    "fare": 1850,
+    "segments": [
+      {
+        "type": "walk",
+        "minutes": 2,
+        "distance_m": 126
+      },
+      {
+        "type": "subway",
+        "line": "수인.분당선",
+        "start": "수원",
+        "end": "정자",
+        "minutes": 38,
+        "stations": 15
+      },
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 1
+      }
+    ]
+  },
+  "37.480,127.148->37.395,127.111": {
+    "time_min": 39,
+    "transfers": 2,
+    "fare": 1750,
+    "segments": [
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 87
+      },
+      {
+        "type": "bus",
+        "line": "38번",
+        "start": "스타필드시티.위례스타힐스.하남시위례도서관",
+        "end": "복정역환승센터1번승강장",
+        "minutes": 17,
+        "stations": 7
+      },
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 58
+      },
+      {
+        "type": "subway",
+        "line": "수인.분당선",
+        "start": "복정",
+        "end": "이매",
+        "minutes": 13,
+        "stations": 5
+      },
+      {
+        "type": "walk",
+        "minutes": 2,
+        "distance_m": 0
+      },
+      {
+        "type": "subway",
+        "line": "경강선",
+        "start": "이매",
+        "end": "판교",
+        "minutes": 3,
+        "stations": 2
+      },
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 56
+      }
+    ]
+  },
+  "37.266,127.000->37.395,127.111": {
+    "time_min": 50,
+    "transfers": 1,
+    "fare": 2950,
+    "segments": [
+      {
+        "type": "walk",
+        "minutes": 2,
+        "distance_m": 125
+      },
+      {
+        "type": "subway",
+        "line": "수인.분당선",
+        "start": "수원",
+        "end": "정자",
+        "minutes": 38,
+        "stations": 15
+      },
+      {
+        "type": "walk",
+        "minutes": 3,
+        "distance_m": 0
+      },
+      {
+        "type": "subway",
+        "line": "신분당선",
+        "start": "정자",
+        "end": "판교",
+        "minutes": 3,
+        "stations": 1
+      },
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 54
+      }
+    ]
+  },
+  "37.480,127.148->37.434,127.130": {
+    "time_min": 29,
+    "transfers": 1,
+    "fare": 1650,
+    "segments": [
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 87
+      },
+      {
+        "type": "bus",
+        "line": "38번",
+        "start": "스타필드시티.위례스타힐스.하남시위례도서관",
+        "end": "복정역환승센터1번승강장",
+        "minutes": 17,
+        "stations": 7
+      },
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 58
+      },
+      {
+        "type": "subway",
+        "line": "수인.분당선",
+        "start": "복정",
+        "end": "모란",
+        "minutes": 7,
+        "stations": 3
+      },
+      {
+        "type": "walk",
+        "minutes": 3,
+        "distance_m": 220
+      }
+    ]
+  },
+  "37.266,127.000->37.434,127.130": {
+    "time_min": 55,
+    "transfers": 0,
+    "fare": 2050,
+    "segments": [
+      {
+        "type": "walk",
+        "minutes": 2,
+        "distance_m": 126
+      },
+      {
+        "type": "subway",
+        "line": "수인.분당선",
+        "start": "수원",
+        "end": "모란",
+        "minutes": 50,
+        "stations": 20
+      },
+      {
+        "type": "walk",
+        "minutes": 3,
+        "distance_m": 220
+      }
+    ]
+  },
+  "37.480,127.148->37.401,126.977": {
+    "time_min": 68,
+    "transfers": 1,
+    "fare": 3200,
+    "segments": [
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 87
+      },
+      {
+        "type": "bus",
+        "line": "9202번",
+        "start": "스타필드시티.위례스타힐스.하남시위례도서관",
+        "end": "말죽거리공원사거리",
+        "minutes": 35,
+        "stations": 16
+      },
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 64
+      },
+      {
+        "type": "bus",
+        "line": "3030번",
+        "start": "말죽거리공원사거리",
+        "end": "인덕원역8번출구",
+        "minutes": 28,
+        "stations": 10
+      },
+      {
+        "type": "walk",
+        "minutes": 3,
+        "distance_m": 199
+      }
+    ]
+  },
+  "37.266,127.000->37.401,126.977": {
+    "time_min": 26,
+    "transfers": 1,
+    "fare": 1750,
+    "segments": [
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 52
+      },
+      {
+        "type": "subway",
+        "line": "1호선",
+        "start": "수원",
+        "end": "금정",
+        "minutes": 17,
+        "stations": 6
+      },
+      {
+        "type": "walk",
+        "minutes": 0,
+        "distance_m": 0
+      },
+      {
+        "type": "subway",
+        "line": "4호선",
+        "start": "금정",
+        "end": "인덕원",
+        "minutes": 7,
+        "stations": 3
+      },
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 56
+      }
+    ]
+  },
+  "37.480,127.148->37.433,126.997": {
+    "time_min": 60,
+    "transfers": 1,
+    "fare": 3200,
+    "segments": [
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 87
+      },
+      {
+        "type": "bus",
+        "line": "9202번",
+        "start": "스타필드시티.위례스타힐스.하남시위례도서관",
+        "end": "말죽거리공원사거리",
+        "minutes": 35,
+        "stations": 16
+      },
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 64
+      },
+      {
+        "type": "bus",
+        "line": "3030번",
+        "start": "말죽거리공원사거리",
+        "end": "10단지",
+        "minutes": 19,
+        "stations": 5
+      },
+      {
+        "type": "walk",
+        "minutes": 4,
+        "distance_m": 269
+      }
+    ]
+  },
+  "37.266,127.000->37.433,126.997": {
+    "time_min": 31,
+    "transfers": 1,
+    "fare": 1850,
+    "segments": [
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 52
+      },
+      {
+        "type": "subway",
+        "line": "1호선",
+        "start": "수원",
+        "end": "금정",
+        "minutes": 17,
+        "stations": 6
+      },
+      {
+        "type": "walk",
+        "minutes": 0,
+        "distance_m": 0
+      },
+      {
+        "type": "subway",
+        "line": "4호선",
+        "start": "금정",
+        "end": "과천",
+        "minutes": 12,
+        "stations": 5
+      },
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 11
+      }
+    ]
+  },
+  "37.366,127.108->37.480,127.148": {
+    "time_min": 35,
+    "transfers": 1,
+    "fare": 1750,
+    "segments": [
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 1
+      },
+      {
+        "type": "subway",
+        "line": "수인.분당선",
+        "start": "정자",
+        "end": "복정",
+        "minutes": 19,
+        "stations": 8,
+        "start_id": 1530,
+        "end_id": 1522,
+        "way_code": 1,
+        "stops": [
+          "정자",
+          "수내",
+          "서현",
+          "이매",
+          "야탑",
+          "모란",
+          "태평",
+          "가천대",
+          "복정"
+        ]
+      },
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 81
+      },
+      {
+        "type": "bus",
+        "line": "3217번",
+        "start": "복정역환승센터3번승강장",
+        "end": "스타필드시티.위례지웰푸르지오.하남시위례도서관",
+        "minutes": 13,
+        "stations": 5,
+        "start_id": 5008839,
+        "end_id": 93340,
+        "bus_ids": [
+          1018
+        ]
+      },
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 51
+      }
+    ]
+  },
+  "37.366,127.108->37.266,127.000": {
+    "time_min": 41,
+    "transfers": 0,
+    "fare": 1850,
+    "segments": [
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 1
+      },
+      {
+        "type": "subway",
+        "line": "수인.분당선",
+        "start": "정자",
+        "end": "수원",
+        "minutes": 38,
+        "stations": 15,
+        "start_id": 1530,
+        "end_id": 1545,
+        "way_code": 2,
+        "stops": [
+          "정자",
+          "미금",
+          "오리",
+          "죽전",
+          "보정",
+          "구성",
+          "신갈",
+          "기흥",
+          "상갈",
+          "청명",
+          "영통",
+          "망포",
+          "매탄권선",
+          "수원시청",
+          "매교",
+          "수원"
+        ]
+      },
+      {
+        "type": "walk",
+        "minutes": 2,
+        "distance_m": 137
+      }
+    ]
+  },
+  "37.366,127.108->37.471,127.127": {
+    "time_min": 22,
+    "transfers": 0,
+    "fare": 1650,
+    "segments": [
+      {
+        "type": "walk",
+        "minutes": 1,
+        "distance_m": 1
+      },
+      {
+        "type": "subway",
+        "line": "수인.분당선",
+        "start": "정자",
+        "end": "복정",
+        "minutes": 19,
+        "stations": 8,
+        "start_id": 1530,
+        "end_id": 1522,
+        "way_code": 1,
+        "stops": [
+          "정자",
+          "수내",
+          "서현",
+          "이매",
+          "야탑",
+          "모란",
+          "태평",
+          "가천대",
+          "복정"
+        ]
+      },
+      {
+        "type": "walk",
+        "minutes": 2,
+        "distance_m": 100
+      }
+    ]
+  }
+}

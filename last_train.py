@@ -31,6 +31,7 @@ BUS_LANE_URL = "https://api.odsay.com/v1/api/busLaneDetail"
 # 시간표 메모장 파일 위치와 보관 기간(일)
 TIMETABLE_CACHE_PATH = os.path.join("data", "timetable_cache.json")
 CACHE_DAYS = 30
+CHECK_EXPIRY = True  # False면 30일이 지나도 그대로 써요 (데모 모드: demo.py가 바꿔요)
 
 # 버스 정류장 도착 시각을 추정할 때 가정하는 속도(시속 km): "더할 땐 빠르게, 뺄 땐 느리게"
 #   - 막차 시각에 이동시간을 "더할" 때는 빠르게(40km) → 도착 추정이 실제보다 이르게 나와요.
@@ -170,7 +171,7 @@ def is_fresh(saved_date):
 def load_timetable(kind, code):
     """메모장에서 시간표(또는 버스 노선 정보)를 꺼냅니다. 없거나 30일이 지났으면 None"""
     saved = read_json(TIMETABLE_CACHE_PATH, {}).get(timetable_key(kind, code))
-    if not saved or not is_fresh(saved["saved"]):
+    if not saved or (CHECK_EXPIRY and not is_fresh(saved["saved"])):
         return None
     if kind == "bus" and "start_point" not in saved["data"]:
         return None  # 기점 이름 등을 저장하기 전의 예전 버스 메모 → 다시 물어봐요

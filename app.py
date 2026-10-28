@@ -11,6 +11,7 @@ from urllib.parse import quote  # 링크 주소에 한글을 안전하게 넣기
 import requests  # 카카오 서버 연결 오류를 알아보기 위한 도구
 import streamlit as st  # 파이썬 코드를 웹 화면으로 바꿔주는 도구
 
+import demo  # API 키가 없을 때 demo_data/만 쓰는 데모 모드 도구
 import geocode  # 출발지 검색(주소 → 키워드 순서) 도구
 from last_train import (
     MANY_RIDES_MESSAGE, clock_text, count_last_train_calls, has_bus, leg_text, meeting_end, plan_last_trains,
@@ -46,6 +47,16 @@ LAST_TRAIN_NOTE = (
 
 # 사이드바의 테스트 모드 스위치 이름
 TEST_MODE_LABEL = "🧪 테스트 모드 (ODsay 호출 안 함)"
+
+# API 키가 없으면 데모 모드: 메모장을 demo_data/로 바꾸고, 테스트 모드를 끌 수 없게 해요.
+DEMO_MODE = demo.is_demo_mode()
+if DEMO_MODE:
+    demo.use_demo_data()
+DEMO_GUIDE = (
+    "API 키가 없어서 데모 모드로 실행 중이에요. '저장된 예시 불러오기'를 누르면 "
+    "스타필드시티 위례 + 수원역 예시가 채워져요. 위례 친구의 '막차로 꼭 도착해야 하는 곳'에 "
+    "복정역을 넣어볼 수도 있어요."
+)
 
 # 약속 시각 입력칸의 처음 값 (저녁 7시)
 DEFAULT_MEETING_TIME = time(19, 0)
@@ -101,7 +112,7 @@ def load_saved_example():
     결과 안내는 사물함의 example_message에 넣어두고, 사이드바에서 보여줘요.
     """
     try:
-        group = find_saved_example(search_places)
+        group = find_saved_example(find_places)
     except (requests.RequestException, ValueError) as error:
         st.session_state.example_message = ("error", f"예시를 찾는 중 문제가 생겼어요: {error}")
         return
@@ -149,6 +160,13 @@ def search_places(query):
     return geocode.search_places(query)
 
 
+def find_places(query):
+    """장소를 찾습니다. 데모 모드면 demo_data/의 예시 장소에서, 아니면 카카오에서 찾아요."""
+    if DEMO_MODE:
+        return demo.search_places(query)
+    return search_places(query)
+
+
 def choose_place(text, pick_key):
     """
     입력한 장소를 검색해서 사용자가 위치를 확인(또는 선택)하게 하고,
@@ -160,14 +178,19 @@ def choose_place(text, pick_key):
         return None
 
     try:
-        results = search_places(text)
+        results = find_places(text)
     except (requests.RequestException, ValueError) as error:
         # 인터넷 문제, 카카오 키 문제 등 → 멈추지 않고 안내만
         st.error(f"'{text}' 검색 중 문제가 생겼어요: {error}")
         return None
 
     if not results:
-        st.warning(f"'{text}'을(를) 찾을 수 없어요. 주소나 이름을 다시 확인해주세요.")
+        if DEMO_MODE:
+            # 데모 모드에서는 예시 장소만 찾을 수 있다고 알려줘요
+            names = ", ".join(demo.place_names())
+            st.warning(f"'{text}'을(를) 찾을 수 없어요. 데모 모드에서는 이 장소만 쓸 수 있어요: {names}")
+        else:
+            st.warning(f"'{text}'을(를) 찾을 수 없어요. 주소나 이름을 다시 확인해주세요.")
         return None
 
     if len(results) == 1:
@@ -375,8 +398,12 @@ def show_last_trains(top, friends, places, goal_texts, goal_places, day_type, me
 # ─────────────────────────────────────────────
 with st.sidebar:
     # 켜져 있으면 ODsay를 절대 부르지 않고, 메모장(캐시)에 저장된 결과만 써요. 처음엔 켜져 있어요.
-    test_mode = st.toggle(TEST_MODE_LABEL, value=True, key="test_mode")
-    st.caption("켜져 있으면 저장된 결과만 쓰고 ODsay 사용량이 늘지 않아요.")
+    # 데모 모드(API 키 없음)에서는 끌 수 없게 막아두고, 항상 테스트 모드로 동작해요.
+    test_mode = st.toggle(TEST_MODE_LABEL, value=True, key="test_mode", disabled=DEMO_MODE) or DEMO_MODE
+    if DEMO_MODE:
+        st.caption(DEMO_GUIDE)
+    else:
+        st.caption("켜져 있으면 저장된 결과만 쓰고 ODsay 사용량이 늘지 않아요.")
     st.button("저장된 예시 불러오기", on_click=load_saved_example)
 
     # 예시 불러오기 결과 안내 (한 번 보여주면 사물함에서 꺼내서 지워요)
@@ -391,7 +418,9 @@ with st.sidebar:
 st.markdown(BAR_STYLE, unsafe_allow_html=True)  # 막대 그래프 모양 넣기
 st.title("🚇 오늘은여기서")
 st.write("친구들 모두에게 공정한 약속 장소 찾기")
-if test_mode:
+if DEMO_MODE:
+    st.info("데모 모드 · API 키 없이 저장된 예시(demo_data)만 써요. 사이드바의 '저장된 예시 불러오기'를 눌러보세요.", icon="🧪")
+elif test_mode:
     # 녹화 화면에서도 테스트 모드인 걸 알 수 있게 위쪽에 표시해요
     st.info("테스트 모드 · ODsay를 부르지 않고 저장된 결과만 써요", icon="🧪")
 

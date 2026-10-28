@@ -9,6 +9,7 @@
 #    가짜 검색 결과에는 공공장소만 써요. (실제 개인 주소는 절대 적지 않기!)
 
 import os  # 파일 경로를 다루기 위한 도구
+from contextlib import ExitStack  # 여러 개의 바꿔치기(mock.patch)를 한꺼번에 켜고 끄기 위한 도구
 from datetime import time  # 약속 시각(예: 19:00)을 만들기 위한 도구
 from urllib.parse import quote  # 링크 주소 속 한글을 확인하기 위한 도구
 import tempfile  # 테스트용 임시 폴더를 만들기 위한 도구
@@ -616,6 +617,78 @@ def test_last_train_call_count_and_bad_goal():
         assert not any(b.label == "🌙 막차 확인하기" for b in at.button)
 
 
+# ── 데모 모드 (API 키 없음 → demo_data/만 사용) ──
+def demo_mode_patches(usage):
+    """
+    키가 없는 컴퓨터처럼 만들고, 데모 모드가 바꾸는 값들(메모장 위치 등)은 테스트가 끝나면 원래대로 돌려놔요.
+    usage: 임시 기록부 경로 (ODsay를 몇 번 불렀는지 확인용)
+    """
+    return [
+        mock.patch("geocode.KAKAO_REST_API_KEY", None), mock.patch("transit.ODSAY_API_KEY", None),
+        mock.patch.object(transit, "CACHE_PATH", transit.CACHE_PATH),
+        mock.patch.object(last_train, "TIMETABLE_CACHE_PATH", last_train.TIMETABLE_CACHE_PATH),
+        mock.patch.object(last_train, "CHECK_EXPIRY", last_train.CHECK_EXPIRY),
+        mock.patch("transit.USAGE_PATH", usage),
+    ]
+
+
+def read_demo_files():
+    """demo_data/ 폴더의 파일 내용을 모두 읽어요. (테스트 전후로 바뀌지 않았는지 비교용)"""
+    folder = "demo_data"
+    return {name: open(os.path.join(folder, name), encoding="utf-8").read() for name in sorted(os.listdir(folder))}
+
+
+def test_demo_mode_full_example():
+    """
+    [데모 모드] 키가 없으면 테스트 모드가 켜진 채로 잠기고, demo_data만으로 예시 전체가 실행돼야 해요.
+    (시간표가 30일 넘게 지난 날이어도 멈추지 않아야 해요)
+    """
+    _, usage = empty_cache_files()
+    before = read_demo_files()
+    with ExitStack() as stack:
+        for patch in demo_mode_patches(usage):
+            stack.enter_context(patch)
+        stack.enter_context(mock.patch("last_train.today_kst", lambda: "2027-06-01"))  # 저장 후 7개월 뒤
+
+        at = open_app()
+        assert at.toggle(key="test_mode").value is True and at.toggle(key="test_mode").disabled
+        assert "데모 모드" in all_text(at)
+
+        at = click(at, "저장된 예시 불러오기")
+        assert [t.value for t in origins(at)] == ["스타필드시티 위례", "수원역"]
+
+        at = click(at, "약속 장소 추천받기")
+        assert not at.exception, at.exception
+        assert "### 🏆 1위 · 정자역" in all_text(at)
+
+        # 위례 친구 목표 = 복정역 → 평일 23:24 (영상 시나리오와 같은 결과)
+        goals(at)[0].input("복정역")
+        at = click(at.run(), "🌙 막차 확인하기")
+        assert not at.exception, at.exception
+        assert meeting_summary(at) == "이 모임은 23:24까지 놀 수 있어요 (스타필드시티 위례 친구 기준)"
+
+        # 위례 친구 목표 = 집(빈칸) → 3217번 버스 때문에 21:43
+        goals(at)[0].input("")
+        at = click(at.run(), "🌙 막차 확인하기")
+        assert meeting_summary(at) == "이 모임은 21:43까지 놀 수 있어요 (스타필드시티 위례 친구 기준)"
+
+    assert transit.read_json(usage, {})["count"] == 0  # ODsay 0건
+    assert read_demo_files() == before  # demo_data는 읽기만 하고 바꾸지 않아요
+
+
+def test_demo_mode_unknown_place():
+    """[데모 모드] 예시에 없는 장소는 카카오를 부르지 않고, 쓸 수 있는 장소 이름을 안내해야 해요."""
+    _, usage = empty_cache_files()
+    with ExitStack() as stack:
+        for patch in demo_mode_patches(usage):
+            stack.enter_context(patch)
+        at = type_places(open_app(), ["강남역", "수원역"])  # 강남역은 데모 데이터에 없어요
+
+    assert not at.exception, at.exception
+    warning = next(w.value for w in at.warning if "강남역" in w.value)
+    assert "데모 모드에서는 이 장소만 쓸 수 있어요: 스타필드시티 위례, 수원역, 복정역" in warning
+
+
 # 이 파일을 직접 실행하면 위의 테스트들을 차례로 실행합니다.
 if __name__ == "__main__":
     usage_before = transit.get_today_usage()
@@ -628,9 +701,13 @@ if __name__ == "__main__":
         test_load_saved_example, test_load_saved_example_none, test_last_train_flow, test_last_train_bus_warning,
         test_video_scenario,
         test_last_train_call_count_and_bad_goal,
+        test_demo_mode_full_example, test_demo_mode_unknown_place,
     ]
     # 모든 테스트 동안 출발지 검색은 가짜로 바꾸고, 인터넷 요청(카카오·ODsay)은 막아둡니다.
-    with mock.patch("geocode.search_places", fake_search), mock.patch("requests.get", internet_forbidden):
+    # API 키도 가짜로 넣어둬요. (키가 없는 컴퓨터에서 돌려도 데모 모드가 아닌 보통 화면을 테스트하도록.
+    #  데모 모드 테스트는 키를 다시 빼서 확인해요)
+    with mock.patch("geocode.search_places", fake_search), mock.patch("requests.get", internet_forbidden), \
+            mock.patch("geocode.KAKAO_REST_API_KEY", "FAKE_KEY"), mock.patch("transit.ODSAY_API_KEY", "FAKE_KEY"):
         for test in tests:
             test()  # 실패하면 여기서 AssertionError가 나며 멈춰요
             print(f"✅ {test.__name__}: {test.__doc__.strip().splitlines()[0]}")
